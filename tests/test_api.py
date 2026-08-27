@@ -79,3 +79,12 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
             "Lowest pre-order", "Senukai", "Bite", "Varle", "Elesen",
             "Elisa", "Euronics", "RDE", "Smartech",
         ]
+
+        source = next(item for item in store.list_items("source", "active") if item["model"] == "55T7B")
+        bite = next(item for item in store.list_sources() if item["key"] == "bite")
+        store.register_monitoring_session("manual-stop-test", False, [])
+        store.start_shop_run("manual-stop-test", [source], [bite])
+        stopped = client.post("/runs/manual-stop-test/stop")
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "INCOMPLETE"
+        assert stopped.json()["shop_results"][0]["status"] == "INCOMPLETE"

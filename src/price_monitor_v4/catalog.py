@@ -123,7 +123,8 @@ class CatalogStore:
                     run_id TEXT PRIMARY KEY,
                     legacy_started INTEGER NOT NULL,
                     marketplace_keys TEXT NOT NULL DEFAULT '[]',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    stopped_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS shop_observations (
                     run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
@@ -142,6 +143,11 @@ class CatalogStore:
                 CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
                 """
             )
+            session_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(monitoring_sessions)")
+            }
+            if "stopped_at" not in session_columns:
+                db.execute("ALTER TABLE monitoring_sessions ADD COLUMN stopped_at TEXT")
             for order, source in enumerate(SOURCES):
                 db.execute(
                     "INSERT INTO monitoring_sources(key, name, kind, country, base_url, enabled, sort_order) "
@@ -592,6 +598,15 @@ class CatalogStore:
                 (run_id, int(legacy_started), json.dumps(marketplace_keys), utc_now()),
             )
 
+    def stop_monitoring_session(self, run_id: str) -> None:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE monitoring_sessions SET stopped_at=? WHERE run_id=?",
+                (utc_now(), run_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(run_id)
+
     def monitoring_session(self, run_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM monitoring_sessions WHERE run_id=?", (run_id,)).fetchone()
@@ -652,6 +667,34 @@ class CatalogStore:
             )
             if not cursor.rowcount:
                 raise KeyError((run_id, item_id, shop_key))
+
+    def cancel_shop_run(self, run_id: str) -> int:
+        """Mark unfinished direct-shop observations as stopped by the user."""
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE shop_observations SET status='INCOMPLETE', error='Stopped by user', checked_at=? "
+                "WHERE run_id=? AND status IN ('PENDING', 'RUNNING')",
+                (utc_now(), run_id),
+            )
+            return int(cursor.rowcount)
+
+    def cancel_legacy_run(self, legacy_database: Path, run_id: str) -> int:
+        """Finalize a run left active inside the v3 marketplace engine."""
+        if not legacy_database.exists():
+            return 0
+        now = utc_now()
+        with self._lock, sqlite3.connect(legacy_database, timeout=30) as db:
+            run_cursor = db.execute(
+                "UPDATE monitoring_runs SET status='INCOMPLETE', finished_at=?, error='Stopped by user' "
+                "WHERE id=? AND status='RUNNING'",
+                (now, run_id),
+            )
+            db.execute(
+                "UPDATE marketplace_tasks SET status='INCOMPLETE', finished_at=?, error='Stopped by user' "
+                "WHERE run_id=? AND status IN ('PENDING', 'RUNNING')",
+                (now, run_id),
+            )
+            return int(run_cursor.rowcount)
 
     def shop_run(self, run_id: str) -> dict[str, Any]:
         with self.connect() as db:

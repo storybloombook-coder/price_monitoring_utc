@@ -470,6 +470,19 @@ class ShopMonitor:
 
         self._tasks[task_key] = asyncio.create_task(run_retry())
 
+    async def cancel_run(self, run_id: str) -> int:
+        task_keys = [
+            key for key in self._tasks
+            if key == run_id or key.startswith(f"retry:{run_id}:")
+        ]
+        tasks = [self._tasks.pop(key) for key in task_keys]
+        for task in tasks:
+            task.cancel()
+        self.store.cancel_shop_run(run_id)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
     def stop(self) -> None:
         for task in self._tasks.values():
             task.cancel()

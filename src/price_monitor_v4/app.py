@@ -337,7 +337,9 @@ def create_app(
             }
         shop = catalog.shop_run(run_id)
         run["shop_results"] = shop["results"]
-        if shop["status"] == "RUNNING" or run.get("status") == "RUNNING":
+        if session.get("stopped_at"):
+            run["status"] = "INCOMPLETE"
+        elif shop["status"] == "RUNNING" or run.get("status") == "RUNNING":
             run["status"] = "RUNNING"
         elif run.get("status") not in {"FAILED", "INCOMPLETE"}:
             run["status"] = "COMPLETE"
@@ -379,6 +381,21 @@ def create_app(
 
     @app.get("/runs/{run_id}")
     async def run_status(run_id: str) -> JSONResponse:
+        return JSONResponse(await merged_run(run_id))
+
+    @app.post("/runs/{run_id}/stop")
+    async def stop_run(run_id: str) -> JSONResponse:
+        session = catalog.monitoring_session(run_id)
+        if not session:
+            raise HTTPException(404, "Monitoring run not found")
+        await shop_monitor.cancel_run(run_id)
+        catalog.stop_monitoring_session(run_id)
+        if session["legacy_started"]:
+            legacy_service.stop()
+            catalog.cancel_legacy_run(app_settings.legacy_database, run_id)
+            await legacy_service.start()
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
         return JSONResponse(await merged_run(run_id))
 
     @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/retry")

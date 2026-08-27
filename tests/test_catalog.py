@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 from openpyxl import Workbook
@@ -120,6 +121,7 @@ def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_pat
     assert inferred["model"] == "25G64"
     assert inferred["source_sheets"] == ["Monitors"]
     assert store.get_item(inferred_stock["id"])["model"] == "25G64"
+    assert store.get_item(inferred_stock["id"])["matched"] is True
 
     store.trash_item(promoted["id"])
     store.delete_item_permanently(promoted["id"])
@@ -144,3 +146,29 @@ def test_action_required_shop_observation_can_be_retried(tmp_path: Path) -> None
     assert result["status"] == "RUNNING"
     assert result["results"][0]["status"] == "PENDING"
     assert result["results"][0]["error"] is None
+
+
+def test_hard_stop_finalizes_shop_and_legacy_work(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "55T7B"})
+    shop = next(item for item in store.list_sources() if item["key"] == "varle")
+    store.register_monitoring_session("run-stop", True, ["hinnavaatlus"])
+    store.start_shop_run("run-stop", [source], [shop])
+
+    assert store.cancel_shop_run("run-stop") == 1
+    store.stop_monitoring_session("run-stop")
+    assert store.shop_run("run-stop")["results"][0]["status"] == "INCOMPLETE"
+    assert store.monitoring_session("run-stop")["stopped_at"] is not None
+
+    legacy_database = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(legacy_database) as db:
+        db.executescript(
+            "CREATE TABLE monitoring_runs(id TEXT PRIMARY KEY, status TEXT, finished_at TEXT, error TEXT);"
+            "CREATE TABLE marketplace_tasks(run_id TEXT, status TEXT, finished_at TEXT, error TEXT);"
+            "INSERT INTO monitoring_runs(id,status) VALUES('run-stop','RUNNING');"
+            "INSERT INTO marketplace_tasks(run_id,status) VALUES('run-stop','RUNNING');"
+        )
+    assert store.cancel_legacy_run(legacy_database, "run-stop") == 1
+    with sqlite3.connect(legacy_database) as db:
+        assert db.execute("SELECT status FROM monitoring_runs").fetchone()[0] == "INCOMPLETE"
+        assert db.execute("SELECT status FROM marketplace_tasks").fetchone()[0] == "INCOMPLETE"

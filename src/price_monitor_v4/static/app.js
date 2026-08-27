@@ -6,7 +6,7 @@ const state = {
   resultFilters: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
-  currentRunId: null, lastActionSignature: '', actionItems: [],
+  currentRunId: null, lastActionSignature: '', actionItems: [], stopRequested: false,
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
 
@@ -61,10 +61,10 @@ function renderSource() {
 
 function renderStock() {
   const items = filteredCatalog('stock');
-  byId('stock-rows').innerHTML = items.length ? items.map(item => `<tr><td><div class="stock-position">${item.state === 'trash' ? '' : `<button class="monitor-arrow" data-action="monitor" data-id="${item.id}" title="Add to monitoring" aria-label="Add ${escapeHtml(item.model || item.nomenclature)} to monitoring">←</button>`}<span><span class="item-primary">${escapeHtml(item.nomenclature)}</span>
+  byId('stock-rows').innerHTML = items.length ? items.map(item => `<tr class="${item.matched ? 'stock-row-monitored' : ''}"><td><div class="stock-position">${item.state === 'trash' ? '' : item.matched ? '<span class="monitor-linked" title="In monitoring" aria-label="In monitoring">✓</span>' : `<button class="monitor-arrow" data-action="monitor" data-id="${item.id}" title="Add to monitoring" aria-label="Add ${escapeHtml(item.model || item.nomenclature)} to monitoring">←</button>`}<span><span class="item-primary">${escapeHtml(item.nomenclature)}</span>
     <span class="item-secondary">${escapeHtml(item.model || 'No linked model')} · ${escapeHtml(item.warehouse || 'No warehouse')}</span></span></div></td>
     <td>${Number(item.quantity || 0).toLocaleString('en-US')} units<span class="item-secondary">${Number(item.unit_cost_eur || 0).toFixed(2)} EUR</span></td>
-    <td>${itemStatus(item)} ${item.state !== 'trash' && !item.matched ? badge('Unmatched', 'unmatched') : ''}</td><td>${actionButtons(item)}</td></tr>`).join('')
+    <td>${itemStatus(item)} ${item.state !== 'trash' && item.matched ? badge('In monitoring', 'monitoring') : item.state !== 'trash' ? badge('Unmatched', 'unmatched') : ''}</td><td>${actionButtons(item)}</td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No positions found.</td></tr>';
 }
 
@@ -362,7 +362,7 @@ function renderActionRequired(run) {
     return;
   }
   const signature = items.map(item => `${item.item_id}:${item.shop_key}`).sort().join('|');
-  if (run.status !== 'RUNNING' && signature !== state.lastActionSignature) {
+  if (run.status === 'COMPLETE' && signature !== state.lastActionSignature) {
     state.lastActionSignature = signature;
     if (!byId('action-dialog').open) byId('action-dialog').showModal();
   }
@@ -398,15 +398,29 @@ function renderRun(run) {
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
   const actionText = actionRequired ? ` · Action required ${actionRequired}` : '';
-  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `Completed · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults(); renderActionRequired(run);
+  const stopped = run.status === 'INCOMPLETE';
+  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); }
 }
 
-async function pollRun(runId) { try { renderRun(await api(`/runs/${runId}`)); } catch (error) { showBanner('error', error.message); } }
+async function pollRun(runId) { try { renderRun(await api(`/runs/${runId}`)); } catch (error) { if (!state.stopRequested) showBanner('error', error.message); } }
 async function startRun() {
-  byId('start-run').disabled = true; state.resultFilterInitialized = false; state.lastActionSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+  byId('start-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
   try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
   catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
+}
+
+async function hardStopRun() {
+  if (!state.currentRunId || !window.confirm('Stop the current monitoring run immediately? Completed results will be kept.')) return;
+  const button = byId('stop-run'); button.disabled = true; button.textContent = 'Stopping…'; state.stopRequested = true;
+  try {
+    if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
+    const run = await api(`/runs/${encodeURIComponent(state.currentRunId)}/stop`, { method: 'POST' });
+    renderRun(run); showBanner('success', 'Monitoring stopped. You can start a new run.');
+  } catch (error) {
+    state.stopRequested = false; button.disabled = false; showBanner('error', error.message);
+  } finally { button.textContent = '■ Hard stop'; }
 }
 
 async function loadExports() {
@@ -424,7 +438,7 @@ function wireEvents() {
   byId('dialog-close').addEventListener('click', () => byId('item-dialog').close()); byId('dialog-cancel').addEventListener('click', () => byId('item-dialog').close());
   byId('action-close').addEventListener('click', () => byId('action-dialog').close()); byId('action-later').addEventListener('click', () => byId('action-dialog').close());
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun);
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('stop-run').addEventListener('click', hardStopRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
 }
