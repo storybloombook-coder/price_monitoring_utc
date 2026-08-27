@@ -355,13 +355,13 @@ class ShopMonitor:
                     async with self._browser_semaphore:
                         if shop["key"] in self._browser_blocked:
                             raise ActionRequiredError(
-                                "Open the shop link in your normal browser, complete its security verification, then retry monitoring"
+                                "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
                             )
                         rendered = await renderer.fetch(url)
                         if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
                             self._browser_blocked.add(shop["key"])
                             raise ActionRequiredError(
-                                "Open the shop link in your normal browser, complete its security verification, then retry monitoring"
+                                "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
                             )
                     return rendered, url
 
