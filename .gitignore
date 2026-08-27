@@ -1,0 +1,17 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# User-provided workbooks
+UTC price 2026 line up.xlsx
+
+# Runtime state
+var/
+
+# Locally packaged release artifacts
+dist/
+
+# Windows noise
+Thumbs.db
+Desktop.ini
