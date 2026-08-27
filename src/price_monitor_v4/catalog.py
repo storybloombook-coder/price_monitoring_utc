@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sqlite3
+import threading
+import unicodedata
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+from openpyxl import Workbook, load_workbook
+
+
+SOURCE_SHEETS = ("TV", "SB", "Monitors")
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def canonicalize(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").upper().strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def number(value: Any, default: float = 0.0) -> float:
+    if value in (None, ""):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).replace(" ", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return default
+
+
+class CatalogStore:
+    def __init__(self, database: Path):
+        self.database = database
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self.migrate()
+
+    def connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        return connection
+
+    def migrate(self) -> None:
+        with self.connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL CHECK(kind IN ('source', 'stock')),
+                    model TEXT,
+                    canonical_model TEXT,
+                    source_sheets TEXT NOT NULL DEFAULT '[]',
+                    nomenclature TEXT,
+                    warehouse TEXT,
+                    quantity REAL,
+                    unit_cost_eur REAL,
+                    source_filename TEXT,
+                    origin TEXT NOT NULL DEFAULT 'manual',
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_catalog_kind_state
+                    ON catalog_items(kind, deleted_at, paused);
+                CREATE INDEX IF NOT EXISTS idx_catalog_canonical
+                    ON catalog_items(canonical_model);
+                CREATE TABLE IF NOT EXISTS catalog_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                """
+            )
+
+    def _set_meta(self, db: sqlite3.Connection, key: str, value: Any) -> None:
+        db.execute(
+            "INSERT INTO catalog_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(value, ensure_ascii=False)),
+        )
+
+    def get_meta(self, key: str, default: Any = None) -> Any:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM catalog_meta WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+    def seed_from_v3(self, legacy_database: Path, source_workbook: Path | None = None) -> dict[str, int]:
+        with self.connect() as db:
+            existing = db.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
+        if existing:
+            return {"source": 0, "stock": 0}
+
+        source_count = 0
+        stock_count = 0
+        if legacy_database.exists():
+            legacy = sqlite3.connect(legacy_database)
+            legacy.row_factory = sqlite3.Row
+            try:
+                tables = {row[0] for row in legacy.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                with self.connect() as db:
+                    now = utc_now()
+                    if "products" in tables:
+                        for row in legacy.execute("SELECT canonical_model, model, source_sheets FROM products"):
+                            sheets = row["source_sheets"] or "[]"
+                            db.execute(
+                                "INSERT INTO catalog_items(kind, model, canonical_model, source_sheets, origin, created_at, updated_at) "
+                                "VALUES('source', ?, ?, ?, 'v3', ?, ?)",
+                                (row["model"], row["canonical_model"], sheets, now, now),
+                            )
+                            source_count += 1
+                    if "stock_items" in tables:
+                        for row in legacy.execute(
+                            "SELECT canonical_model, nomenclature, warehouse, quantity, unit_cost_eur, source_filename FROM stock_items"
+                        ):
+                            db.execute(
+                                "INSERT INTO catalog_items(kind, model, canonical_model, nomenclature, warehouse, quantity, "
+                                "unit_cost_eur, source_filename, origin, created_at, updated_at) "
+                                "VALUES('stock', ?, ?, ?, ?, ?, ?, ?, 'v3', ?, ?)",
+                                (
+                                    row["canonical_model"], row["canonical_model"], row["nomenclature"],
+                                    row["warehouse"], number(row["quantity"]), number(row["unit_cost_eur"]),
+                                    row["source_filename"], now, now,
+                                ),
+                            )
+                            stock_count += 1
+            finally:
+                legacy.close()
+
+        if source_count == 0 and source_workbook and source_workbook.exists():
+            source_count = self.import_source_workbook(source_workbook, source_workbook.name)["imported"]
+        return {"source": source_count, "stock": stock_count}
+
+    def _row_to_item(self, row: sqlite3.Row, active_models: set[str]) -> dict[str, Any]:
+        item = dict(row)
+        item["paused"] = bool(item["paused"])
+        item["source_sheets"] = json.loads(item["source_sheets"] or "[]")
+        item["state"] = "trash" if item["deleted_at"] else ("paused" if item["paused"] else "active")
+        if item["kind"] == "stock":
+            item["matched"] = bool(item["canonical_model"] and item["canonical_model"] in active_models)
+        return item
+
+    def list_items(self, kind: str, scope: str = "active", query: str = "") -> list[dict[str, Any]]:
+        if kind not in {"source", "stock"}:
+            raise ValueError("kind must be source or stock")
+        clauses = ["kind = ?"]
+        values: list[Any] = [kind]
+        if scope == "active":
+            clauses.append("deleted_at IS NULL")
+        elif scope == "trash":
+            clauses.append("deleted_at IS NOT NULL")
+        elif scope != "all":
+            raise ValueError("scope must be active, trash or all")
+        if query.strip():
+            clauses.append("UPPER(COALESCE(model,'') || ' ' || COALESCE(nomenclature,'') || ' ' || COALESCE(warehouse,'')) LIKE ?")
+            values.append(f"%{query.strip().upper()}%")
+
+        with self.connect() as db:
+            active_models = {
+                row[0] for row in db.execute(
+                    "SELECT canonical_model FROM catalog_items WHERE kind='source' AND deleted_at IS NULL AND paused=0"
+                )
+            }
+            rows = db.execute(
+                f"SELECT * FROM catalog_items WHERE {' AND '.join(clauses)} ORDER BY deleted_at IS NOT NULL, paused, COALESCE(model,nomenclature)",
+                values,
+            ).fetchall()
+        return [self._row_to_item(row, active_models) for row in rows]
+
+    def get_item(self, item_id: int) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM catalog_items WHERE id=?", (item_id,)).fetchone()
+            active_models = {
+                result[0] for result in db.execute(
+                    "SELECT canonical_model FROM catalog_items WHERE kind='source' AND deleted_at IS NULL AND paused=0"
+                )
+            }
+        if not row:
+            raise KeyError(item_id)
+        return self._row_to_item(row, active_models)
+
+    def create_item(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        if kind == "source":
+            model = str(payload.get("model", "")).strip()
+            if not model:
+                raise ValueError("Model is required")
+            canonical = canonicalize(model)
+            sheets = payload.get("source_sheets") or ["TV"]
+            sheets = [sheet for sheet in sheets if sheet in SOURCE_SHEETS] or ["TV"]
+            with self._lock, self.connect() as db:
+                duplicate = db.execute(
+                    "SELECT id FROM catalog_items WHERE kind='source' AND canonical_model=? AND deleted_at IS NULL",
+                    (canonical,),
+                ).fetchone()
+                if duplicate:
+                    raise ValueError(f"Model already exists (item {duplicate['id']})")
+                cursor = db.execute(
+                    "INSERT INTO catalog_items(kind, model, canonical_model, source_sheets, origin, paused, created_at, updated_at) "
+                    "VALUES('source', ?, ?, ?, 'manual', ?, ?, ?)",
+                    (model, canonical, json.dumps(sheets), int(bool(payload.get("paused"))), now, now),
+                )
+        elif kind == "stock":
+            nomenclature = str(payload.get("nomenclature", "")).strip()
+            if not nomenclature:
+                raise ValueError("Nomenclature is required")
+            model = str(payload.get("model", "")).strip() or None
+            with self._lock, self.connect() as db:
+                cursor = db.execute(
+                    "INSERT INTO catalog_items(kind, model, canonical_model, nomenclature, warehouse, quantity, unit_cost_eur, "
+                    "origin, paused, created_at, updated_at) VALUES('stock', ?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?)",
+                    (
+                        model, canonicalize(model) if model else None, nomenclature,
+                        str(payload.get("warehouse", "")).strip() or None,
+                        number(payload.get("quantity")), number(payload.get("unit_cost_eur")),
+                        int(bool(payload.get("paused"))), now, now,
+                    ),
+                )
+        else:
+            raise ValueError("kind must be source or stock")
+        return self.get_item(cursor.lastrowid)
+
+    def update_item(self, item_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_item(item_id)
+        fields: dict[str, Any] = {}
+        if current["kind"] == "source":
+            if "model" in payload:
+                model = str(payload["model"]).strip()
+                if not model:
+                    raise ValueError("Model is required")
+                fields.update(model=model, canonical_model=canonicalize(model))
+            if "source_sheets" in payload:
+                sheets = [sheet for sheet in payload["source_sheets"] if sheet in SOURCE_SHEETS]
+                fields["source_sheets"] = json.dumps(sheets or ["TV"])
+        else:
+            for name in ("nomenclature", "warehouse"):
+                if name in payload:
+                    fields[name] = str(payload[name]).strip() or None
+            if "model" in payload:
+                model = str(payload["model"]).strip() or None
+                fields.update(model=model, canonical_model=canonicalize(model) if model else None)
+            for name in ("quantity", "unit_cost_eur"):
+                if name in payload:
+                    fields[name] = number(payload[name])
+        if "paused" in payload:
+            fields["paused"] = int(bool(payload["paused"]))
+        if not fields:
+            return current
+        fields["origin"] = "manual"
+        fields["updated_at"] = utc_now()
+        assignments = ", ".join(f"{name}=?" for name in fields)
+        with self._lock, self.connect() as db:
+            if current["kind"] == "source" and "canonical_model" in fields:
+                duplicate = db.execute(
+                    "SELECT id FROM catalog_items WHERE kind='source' AND canonical_model=? "
+                    "AND deleted_at IS NULL AND id<>?",
+                    (fields["canonical_model"], item_id),
+                ).fetchone()
+                if duplicate:
+                    raise ValueError(f"Model already exists (item {duplicate['id']})")
+            db.execute(f"UPDATE catalog_items SET {assignments} WHERE id=?", (*fields.values(), item_id))
+        return self.get_item(item_id)
+
+    def trash_item(self, item_id: int) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE catalog_items SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+                (utc_now(), utc_now(), item_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(item_id)
+        return self.get_item(item_id)
+
+    def restore_item(self, item_id: int) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE catalog_items SET deleted_at=NULL, updated_at=? WHERE id=? AND deleted_at IS NOT NULL",
+                (utc_now(), item_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(item_id)
+        return self.get_item(item_id)
+
+    def import_source_workbook(self, path: Path, filename: str) -> dict[str, Any]:
+        workbook = load_workbook(path, data_only=True, read_only=True)
+        parsed: dict[str, dict[str, Any]] = {}
+        for sheet_name in SOURCE_SHEETS:
+            if sheet_name not in workbook.sheetnames:
+                continue
+            sheet = workbook[sheet_name]
+            rows = sheet.iter_rows(values_only=True)
+            header = next(rows, ())
+            model_index = next(
+                (index for index, value in enumerate(header) if str(value or "").strip().lower() == "model"),
+                None,
+            )
+            if model_index is None:
+                continue
+            for row in rows:
+                if model_index >= len(row) or row[model_index] in (None, ""):
+                    continue
+                model = str(row[model_index]).strip()
+                canonical = canonicalize(model)
+                entry = parsed.setdefault(canonical, {"model": model, "source_sheets": []})
+                if sheet_name not in entry["source_sheets"]:
+                    entry["source_sheets"].append(sheet_name)
+        if not parsed:
+            raise ValueError("No models found in TV, SB or Monitors sheets")
+
+        inserted = 0
+        updated = 0
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            for canonical, item in parsed.items():
+                existing = db.execute(
+                    "SELECT id FROM catalog_items WHERE kind='source' AND canonical_model=? AND deleted_at IS NULL",
+                    (canonical,),
+                ).fetchone()
+                if existing:
+                    db.execute(
+                        "UPDATE catalog_items SET model=?, source_sheets=?, source_filename=?, updated_at=? WHERE id=?",
+                        (item["model"], json.dumps(item["source_sheets"]), filename, now, existing["id"]),
+                    )
+                    updated += 1
+                else:
+                    db.execute(
+                        "INSERT INTO catalog_items(kind, model, canonical_model, source_sheets, source_filename, origin, created_at, updated_at) "
+                        "VALUES('source', ?, ?, ?, ?, 'file', ?, ?)",
+                        (item["model"], canonical, json.dumps(item["source_sheets"]), filename, now, now),
+                    )
+                    inserted += 1
+            self._set_meta(db, "source_upload", {"filename": filename, "uploaded_at": now, "count": len(parsed)})
+        return {"imported": len(parsed), "inserted": inserted, "updated": updated}
+
+    def import_stock_workbook(self, path: Path, filename: str) -> dict[str, Any]:
+        workbook = load_workbook(path, data_only=True, read_only=True)
+        source_models = [item["model"] for item in self.list_items("source", "active")]
+        source_models.sort(key=len, reverse=True)
+        parsed: list[dict[str, Any]] = []
+        for sheet in workbook.worksheets:
+            warehouse: str | None = None
+            for row in sheet.iter_rows(values_only=True):
+                name = str(row[1]).strip() if len(row) > 1 and row[1] not in (None, "") else ""
+                qty = row[2] if len(row) > 2 else None
+                cost = row[3] if len(row) > 3 else None
+                if not name:
+                    continue
+                if qty in (None, "") and cost in (None, ""):
+                    warehouse = name
+                    continue
+                if name.lower() in {"item", "total", "nomenclature", "наименование"}:
+                    continue
+                matched = next((model for model in source_models if canonicalize(model) in canonicalize(name)), None)
+                parsed.append(
+                    {
+                        "nomenclature": name,
+                        "model": matched,
+                        "canonical_model": canonicalize(matched) if matched else None,
+                        "warehouse": warehouse,
+                        "quantity": number(qty),
+                        "unit_cost_eur": number(cost),
+                    }
+                )
+        if not parsed:
+            raise ValueError("No stock items found in columns B-D")
+
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM catalog_items WHERE kind='stock' AND origin IN ('file', 'v3')")
+            for item in parsed:
+                db.execute(
+                    "INSERT INTO catalog_items(kind, model, canonical_model, nomenclature, warehouse, quantity, unit_cost_eur, "
+                    "source_filename, origin, created_at, updated_at) VALUES('stock', ?, ?, ?, ?, ?, ?, ?, 'file', ?, ?)",
+                    (
+                        item["model"], item["canonical_model"], item["nomenclature"], item["warehouse"],
+                        item["quantity"], item["unit_cost_eur"], filename, now, now,
+                    ),
+                )
+            self._set_meta(db, "stock_upload", {"filename": filename, "uploaded_at": now, "count": len(parsed)})
+        return {"imported": len(parsed), "matched": sum(1 for item in parsed if item["canonical_model"])}
+
+    def stats(self) -> dict[str, Any]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT kind, SUM(deleted_at IS NULL) active_or_paused, "
+                "SUM(deleted_at IS NULL AND paused=0) active, SUM(deleted_at IS NULL AND paused=1) paused, "
+                "SUM(deleted_at IS NOT NULL) trash FROM catalog_items GROUP BY kind"
+            ).fetchall()
+            active_models = {
+                row[0] for row in db.execute(
+                    "SELECT canonical_model FROM catalog_items WHERE kind='source' AND deleted_at IS NULL AND paused=0"
+                )
+            }
+            stock_models = [
+                row[0] for row in db.execute(
+                    "SELECT canonical_model FROM catalog_items WHERE kind='stock' AND deleted_at IS NULL AND paused=0"
+                )
+            ]
+        result = {
+            "source": {"active_or_paused": 0, "active": 0, "paused": 0, "trash": 0},
+            "stock": {"active_or_paused": 0, "active": 0, "paused": 0, "trash": 0},
+        }
+        for row in rows:
+            result[row["kind"]] = {key: int(row[key] or 0) for key in ("active_or_paused", "active", "paused", "trash")}
+        result["stock"]["unmatched"] = sum(1 for model in stock_models if not model or model not in active_models)
+        return result
+
+    def prepare_legacy(self, original_database: Path, legacy_database: Path, workbook_path: Path) -> None:
+        legacy_database.parent.mkdir(parents=True, exist_ok=True)
+        if not legacy_database.exists() and original_database.exists():
+            source = sqlite3.connect(original_database)
+            destination = sqlite3.connect(legacy_database)
+            try:
+                source.backup(destination)
+            finally:
+                source.close()
+                destination.close()
+        self._ensure_legacy_schema(legacy_database)
+        self._write_active_workbook(workbook_path)
+        self._write_legacy_stock(legacy_database)
+
+    def _ensure_legacy_schema(self, database: Path) -> None:
+        with sqlite3.connect(database) as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS monitoring_runs (
+                    id TEXT PRIMARY KEY, trigger TEXT NOT NULL, status TEXT NOT NULL,
+                    started_at TEXT NOT NULL, finished_at TEXT, source_workbook TEXT,
+                    export_path TEXT, error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_model TEXT UNIQUE NOT NULL,
+                    model TEXT NOT NULL, source_sheets TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS marketplace_tasks (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES monitoring_runs(id),
+                    canonical_model TEXT NOT NULL, marketplace TEXT NOT NULL, status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0, product_url TEXT, error TEXT,
+                    started_at TEXT, finished_at TEXT, matched_title TEXT
+                );
+                CREATE TABLE IF NOT EXISTS offer_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES marketplace_tasks(id),
+                    store_name TEXT NOT NULL, original_price TEXT NOT NULL, currency TEXT NOT NULL,
+                    price_eur TEXT NOT NULL, availability TEXT NOT NULL, product_url TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS application_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, level TEXT NOT NULL,
+                    message TEXT NOT NULL, context TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS stock_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_model TEXT, nomenclature TEXT NOT NULL,
+                    warehouse TEXT, quantity TEXT NOT NULL, unit_cost_eur TEXT NOT NULL,
+                    source_filename TEXT NOT NULL, uploaded_at TEXT NOT NULL
+                );
+                """
+            )
+
+    def _write_active_workbook(self, path: Path) -> None:
+        items = self.list_items("source", "active")
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        sheets = {name: workbook.create_sheet(name) for name in SOURCE_SHEETS}
+        for sheet in sheets.values():
+            sheet.append(["Model"])
+        for item in items:
+            if item["paused"] or item["deleted_at"]:
+                continue
+            targets = item["source_sheets"] or ["TV"]
+            for name in targets:
+                if name in sheets:
+                    sheets[name].append([item["model"]])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        workbook.save(path)
+
+    def _write_legacy_stock(self, database: Path) -> None:
+        items = self.list_items("stock", "active")
+        now = utc_now()
+        with sqlite3.connect(database) as db:
+            db.execute("DELETE FROM stock_items")
+            for item in items:
+                if item["paused"] or item["deleted_at"]:
+                    continue
+                db.execute(
+                    "INSERT INTO stock_items(canonical_model, nomenclature, warehouse, quantity, unit_cost_eur, source_filename, uploaded_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        item["canonical_model"], item["nomenclature"], item["warehouse"],
+                        str(item["quantity"] or 0), str(item["unit_cost_eur"] or 0),
+                        item["source_filename"] or "manual-v4", now,
+                    ),
+                )

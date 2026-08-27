@@ -11,6 +11,14 @@ var/
 
 # Locally packaged release artifacts
 dist/
+build/
+
+# Python development environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
 
 # Windows noise
 Thumbs.db

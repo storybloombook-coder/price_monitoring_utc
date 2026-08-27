@@ -1,22 +1,31 @@
-# Price Monitor 3.0.0 (portable)
+# Price Monitor 4.0.0
 
-Portable Windows application for daily TCL marketplace price monitoring. The application preserves the source workbook, stores run history in SQLite, and creates versioned Excel exports.
+Local-first Windows application for daily TCL marketplace price monitoring. Version 4 adds an editable catalog for monitored models and stock positions while preserving Excel import, SQLite history, marketplace checks, and versioned exports.
 
 ## Run
 
-1. Download and unpack the portable archive.
+1. Download and unpack the v4 portable archive.
 2. Copy `.env.example` to `.env` and adjust the settings if needed.
-3. Put `UTC price 2026 line up.xlsx` beside `PriceMonitor.exe`, or set `SOURCE_WORKBOOK` in `.env` to an absolute path.
-4. Run `PriceMonitor.exe`.
-5. Open <http://127.0.0.1:8000/> in a browser. API documentation is available at <http://127.0.0.1:8000/docs>.
+3. Run `PriceMonitor.exe`.
+4. The application opens <http://127.0.0.1:8000/> automatically. API documentation is available at <http://127.0.0.1:8000/docs>.
 
-Python does not need to be installed. Keep `PriceMonitor.exe` and the complete `_internal` directory together.
+Python does not need to be installed. Keep the complete portable directory together, including `_internal` and `legacy`.
+
+## Editable catalog
+
+After Setup, open **Управление позициями**. The panel has two synchronized lists:
+
+- **Source / Мониторинг** — models included in marketplace checks;
+- **Stock / Склад** — inventory, warehouse, quantity, unit cost, and linked model.
+
+Both lists support manual creation, editing, search, pause/resume, soft deletion to trash, and restoration. Paused and trashed items are excluded from new monitoring runs. Excel upload remains available for bulk import; manually edited items are preserved as manual records.
 
 ## Configuration
 
 The default configuration is documented in `.env.example`. Runtime data is stored beside the executable:
 
-- `var/price_monitor.sqlite3` — local database;
+- `var/price_monitor_v4.sqlite3` — editable v4 catalog;
+- `var/price_monitor_v4_legacy.sqlite3` — monitoring history and observations;
 - `var/exports/` — generated Excel reports;
 - `var/logs/` — application logs;
 - `var/stock/latest.xlsx` — latest stock data.
@@ -35,6 +44,12 @@ Live marketplace collection is disabled in the example configuration (`ENABLE_LI
 4. The exporter creates a timestamped workbook in `var/exports/`, adds price/run/offer history, and leaves the source workbook unchanged.
 5. `/runs/{run_id}`, `/history`, `/logs`, and `/exports/latest` expose local results.
 
-## Build provenance
+## Development
 
-This repository contains the supplied portable PyInstaller build of Price Monitor 3.0.0. The original Python source files and the referenced `build-exe.bat` build script were not present in the supplied folder, so the executable cannot be reproducibly recompiled from this repository alone.
+```powershell
+./run-v4.ps1
+./run-v4.ps1 -Test
+./build-v4.ps1
+```
+
+The Python source for the v4 catalog, API, launcher, and interface is reproducible from this repository. Marketplace collection is temporarily delegated to the supplied v3 executable in an isolated internal service because the original v3 adapter source was not present in the supplied folder.
