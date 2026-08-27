@@ -306,6 +306,7 @@ class ShopMonitor:
         self.browser_bridge = browser_bridge
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._browser_semaphore = asyncio.Semaphore(1)
+        self._extension_semaphore = asyncio.Semaphore(2)
         self._browser_blocked: set[str] = set()
 
     def start(self, run_id: str) -> None:
@@ -352,7 +353,8 @@ class ShopMonitor:
                 if not self.browser_bridge or not self.browser_bridge.connected:
                     raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
                 try:
-                    capture = await self.browser_bridge.capture(shop["key"], model["model"], url)
+                    async with self._extension_semaphore:
+                        capture = await self.browser_bridge.capture(shop["key"], model["model"], url)
                 except (BrowserBridgeUnavailable, BrowserBridgeTimeout) as error:
                     raise ActionRequiredError(str(error)) from error
                 rendered = str(capture.get("html") or "")

@@ -38,8 +38,8 @@ document.getElementById('save').addEventListener('click', async () => {
   await chrome.storage.local.set({ appUrl, closeSuccessfulTabs: closeTabsInput.checked });
   showStatus('', 'Connecting…');
   try {
-    const response = await fetch(`${appUrl}/browser-bridge/heartbeat`, { method: 'POST' });
-    if (!response.ok) throw new Error(`Connection failed (${response.status})`);
+    const response = await chrome.runtime.sendMessage({ type: 'connect' });
+    if (!response?.ok) throw new Error(response?.error || 'Connection failed');
     showStatus('connected', 'Connected to PriceMonitor');
     await chrome.storage.local.set({ bridgeStatus: { status: 'connected', message: 'Connected to PriceMonitor', updatedAt: Date.now() } });
   } catch (error) {
