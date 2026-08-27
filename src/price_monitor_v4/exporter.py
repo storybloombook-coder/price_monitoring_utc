@@ -11,7 +11,7 @@ from .sources import SHOPS
 
 
 TERMINAL_PRIORITY = {
-    "RUNNING": 6, "PENDING": 6, "FAILED": 5, "INCOMPLETE": 4,
+    "ACTION_REQUIRED": 7, "RUNNING": 6, "PENDING": 6, "FAILED": 5, "INCOMPLETE": 4,
     "SUCCESS": 3, "NOT_FOUND": 2, "NOT_STARTED": 1,
 }
 
@@ -29,6 +29,23 @@ def lowest(tasks: list[dict[str, Any]], field: str) -> dict[str, Any] | None:
     offers = [task.get(field) for task in tasks if task.get(field)]
     offers = [offer for offer in offers if price(offer) is not None]
     return min(offers, key=lambda offer: price(offer) or 0, default=None)
+
+
+def lowest_with_shops(
+    tasks: list[dict[str, Any]], shops: list[dict[str, Any]], field: str, availability: str
+) -> dict[str, Any] | None:
+    offers = [task.get(field) for task in tasks if task.get(field)]
+    offers.extend(
+        {
+            "price_eur": item.get("price_eur"),
+            "store": item.get("shop_name") or item.get("shop_key"),
+            "url": item.get("product_url") or item.get("search_url"),
+        }
+        for item in shops
+        if item.get("status") == "SUCCESS" and item.get("availability") == availability
+    )
+    valid = [offer for offer in offers if price(offer) is not None]
+    return min(valid, key=lambda offer: price(offer) or 0, default=None)
 
 
 def overall_status(tasks: list[dict[str, Any]], shops: list[dict[str, Any]]) -> str:
@@ -75,8 +92,8 @@ def write_monitoring_export(
     for key in sorted(model_names, key=lambda value: model_names[value].upper()):
         tasks = tasks_by_model[key]
         shop_results = shops_by_model[key]
-        stock_offer = lowest(tasks, "cheapest_in_stock")
-        preorder_offer = lowest(tasks, "cheapest_pre_order")
+        stock_offer = lowest_with_shops(tasks, shop_results, "cheapest_in_stock", "IN_STOCK")
+        preorder_offer = lowest_with_shops(tasks, shop_results, "cheapest_pre_order", "PRE_ORDER")
         best_price = price(stock_offer) if stock_offer else price(preorder_offer)
         stock_quantity = next((task.get("stock_quantity") for task in tasks if task.get("stock_quantity") is not None), None)
         stock_cost = next((task.get("stock_unit_cost_eur") for task in tasks if task.get("stock_unit_cost_eur") is not None), None)
@@ -130,4 +147,3 @@ def write_monitoring_export(
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
     return path
-

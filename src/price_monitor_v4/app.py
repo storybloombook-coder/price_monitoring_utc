@@ -381,6 +381,18 @@ def create_app(
     async def run_status(run_id: str) -> JSONResponse:
         return JSONResponse(await merged_run(run_id))
 
+    @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/retry")
+    async def retry_shop_check(run_id: str, item_id: int, shop_key: str) -> dict[str, Any]:
+        try:
+            shop_monitor.retry(run_id, item_id, shop_key)
+        except KeyError as error:
+            raise HTTPException(404, "Shop observation not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {"run_id": run_id, "item_id": item_id, "shop_key": shop_key, "status": "PENDING"}
+
     @app.get("/history")
     async def history(limit: int = 100) -> Response:
         return await proxy("GET", f"/history?limit={limit}")

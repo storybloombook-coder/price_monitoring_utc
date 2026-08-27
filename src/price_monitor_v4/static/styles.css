@@ -49,6 +49,10 @@ button:hover { background: var(--brand-hover); }
 button:disabled { opacity: .55; cursor: wait; }
 button.secondary { color: var(--text); background: transparent; border-color: var(--line); }
 button.secondary:hover { background: var(--surface-2); }
+.button-link { display: inline-flex; align-items: center; padding: 8px 13px; border: 1px solid var(--brand); border-radius: 8px; background: var(--brand); color: #fff; font-weight: 650; text-decoration: none; }
+.button-link:hover { background: var(--brand-hover); }
+.button-link.secondary { color: var(--text); background: transparent; border-color: var(--line); }
+.button-link.secondary:hover { background: var(--surface); }
 button.compact { padding: 6px 10px; font-size: 12px; }
 button.link-action { padding: 2px 4px; background: transparent; color: var(--blue); border: 0; font-weight: 600; }
 button.link-action:hover { text-decoration: underline; }
@@ -86,8 +90,6 @@ input[type="search"], input[type="text"], input[type="number"], input[type="url"
 .filter-menu label:hover { background: var(--surface-2); }
 .filter-menu input { accent-color: var(--brand); }
 .columns-filter { margin-left: auto; }
-.eye-button { border: 0; background: transparent; color: var(--muted); padding: 2px 4px; margin-left: 5px; border-radius: 5px; vertical-align: middle; font-size: 13px; }
-.eye-button:hover { color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
 .col-hidden { display: none; }
 .model-cell { min-width: 145px; font-weight: 750; }
 .source-cell { min-width: 150px; }
@@ -173,6 +175,11 @@ dialog form { padding: 20px; }
 .shop-link-grid label { min-width: 0; }
 .pause-toggle { display: flex; gap: 7px; align-items: center; margin: 16px 0; }
 .dialog-actions { justify-content: flex-end; }
+.action-dialog { padding: 20px; width: min(680px, calc(100% - 28px)); }
+.action-items { display: grid; gap: 10px; margin: 16px 0; max-height: 55vh; overflow: auto; }
+.action-item { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px 16px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.action-item strong, .action-item span { display: block; }
+.action-item-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 @media (max-width: 950px) {
   .catalog-grid, .setup-grid, .footer-grid, .source-settings { grid-template-columns: 1fr; }
   .section-heading > .muted { text-align: left; }

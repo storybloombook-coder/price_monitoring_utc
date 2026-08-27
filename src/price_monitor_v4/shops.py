@@ -437,6 +437,39 @@ class ShopMonitor:
                 search_url=search_url, error=str(error)[:500]
             )
 
+    def retry(self, run_id: str, item_id: int, shop_key: str) -> None:
+        model = self.store.get_item(item_id)
+        shop = next(
+            (item for item in self.store.list_sources() if item["key"] == shop_key and item["kind"] == "shop"),
+            None,
+        )
+        if model["kind"] != "source" or not shop:
+            raise KeyError((item_id, shop_key))
+        task_key = f"retry:{run_id}:{item_id}:{shop_key}"
+        if task_key in self._tasks:
+            raise ValueError("This shop check is already running")
+        self.store.retry_shop_observation(run_id, item_id, shop_key)
+        self._extension_blocked.discard(shop_key)
+        self._browser_blocked.discard(shop_key)
+
+        async def run_retry() -> None:
+            renderer = EdgeRenderer(self.timeout_seconds)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9,lt;q=0.8,et;q=0.7",
+            }
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout_seconds, follow_redirects=True, headers=headers
+                ) as client:
+                    await self._check_one(client, renderer, run_id, model, shop)
+            finally:
+                await renderer.close()
+                self._tasks.pop(task_key, None)
+
+        self._tasks[task_key] = asyncio.create_task(run_retry())
+
     def stop(self) -> None:
         for task in self._tasks.values():
             task.cancel()

@@ -115,7 +115,32 @@ def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_pat
     assert promoted["paused"] is False
     assert store.promote_stock_item(stock["id"])["id"] == promoted["id"]
 
+    inferred_stock = store.create_item("stock", {"nomenclature": "Monitor TCL 25G64, gab."})
+    inferred = store.promote_stock_item(inferred_stock["id"])
+    assert inferred["model"] == "25G64"
+    assert inferred["source_sheets"] == ["Monitors"]
+    assert store.get_item(inferred_stock["id"])["model"] == "25G64"
+
     store.trash_item(promoted["id"])
     store.delete_item_permanently(promoted["id"])
     with pytest.raises(KeyError):
         store.get_item(promoted["id"])
+
+
+def test_action_required_shop_observation_can_be_retried(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "25G64", "source_sheets": ["Monitors"]})
+    shop = next(item for item in store.list_sources() if item["key"] == "bite")
+    store.register_monitoring_session("run-1", False, [])
+    store.start_shop_run("run-1", [source], [shop])
+    store.finish_shop_observation(
+        "run-1", source["id"], "bite", "ACTION_REQUIRED",
+        search_url="https://www.bite.lt/paieska?q=25G64", error="Verification required",
+    )
+
+    store.retry_shop_observation("run-1", source["id"], "bite")
+
+    result = store.shop_run("run-1")
+    assert result["status"] == "RUNNING"
+    assert result["results"][0]["status"] == "PENDING"
+    assert result["results"][0]["error"] is None

@@ -39,6 +39,27 @@ def number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def infer_model_from_nomenclature(value: str) -> str | None:
+    """Extract a likely TCL model token such as 55T7B, Q65H, or 25G64."""
+    tokens = re.findall(r"[A-Z0-9]+", canonicalize(value))
+    ignored = {"TCL", "TV", "MONITOR", "SOUNDBAR", "GAB", "PRO"}
+    for index, token in enumerate(tokens):
+        if token in ignored or len(token) < 4:
+            continue
+        if any(char.isalpha() for char in token) and any(char.isdigit() for char in token):
+            return f"{token} PRO" if index + 1 < len(tokens) and tokens[index + 1] == "PRO" else token
+    return None
+
+
+def source_sheet_for_nomenclature(value: str) -> str:
+    lowered = value.lower()
+    if "soundbar" in lowered:
+        return "SB"
+    if "monitor" in lowered:
+        return "Monitors"
+    return "TV"
+
+
 class CatalogStore:
     def __init__(self, database: Path):
         self.database = database
@@ -379,12 +400,17 @@ class CatalogStore:
         stock = self.get_item(item_id)
         if stock["kind"] != "stock" or stock["deleted_at"]:
             raise KeyError(item_id)
-        model = str(stock.get("model") or "").strip()
+        model = str(stock.get("model") or "").strip() or infer_model_from_nomenclature(stock.get("nomenclature") or "")
         if not model:
-            raise ValueError("Link a model to this stock item before adding it to monitoring")
+            raise ValueError("No model could be recognized in this stock item; edit the linked model first")
         canonical = canonicalize(model)
         now = utc_now()
         with self._lock, self.connect() as db:
+            if not stock.get("model"):
+                db.execute(
+                    "UPDATE catalog_items SET model=?, canonical_model=?, origin='manual', updated_at=? WHERE id=?",
+                    (model, canonical, now, item_id),
+                )
             existing = db.execute(
                 "SELECT id, deleted_at FROM catalog_items WHERE kind='source' AND canonical_model=? "
                 "ORDER BY deleted_at IS NULL DESC, id DESC LIMIT 1",
@@ -400,7 +426,7 @@ class CatalogStore:
                 cursor = db.execute(
                     "INSERT INTO catalog_items(kind, model, canonical_model, source_sheets, origin, paused, created_at, updated_at) "
                     "VALUES('source', ?, ?, ?, 'manual', 0, ?, ?)",
-                    (model, canonical, json.dumps(["TV"]), now, now),
+                    (model, canonical, json.dumps([source_sheet_for_nomenclature(stock.get("nomenclature") or "")]), now, now),
                 )
                 source_id = int(cursor.lastrowid)
         return self.get_item(source_id)
@@ -616,6 +642,16 @@ class CatalogStore:
                     run_id, item_id, shop_key,
                 ),
             )
+
+    def retry_shop_observation(self, run_id: str, item_id: int, shop_key: str) -> None:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE shop_observations SET status='PENDING', title=NULL, price_eur=NULL, availability=NULL, "
+                "product_url=NULL, error=NULL, checked_at=NULL WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            )
+            if not cursor.rowcount:
+                raise KeyError((run_id, item_id, shop_key))
 
     def shop_run(self, run_id: str) -> dict[str, Any]:
         with self.connect() as db:

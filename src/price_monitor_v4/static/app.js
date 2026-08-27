@@ -4,7 +4,9 @@ const state = {
   source: [], sourceOptions: [], stock: [], summary: null, sources: [], tasks: [], shopResults: [], runPoll: null,
   catalogStates: { source: new Set(['active', 'paused']), stock: new Set(['active', 'paused']) },
   resultFilters: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
+  resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
+  currentRunId: null, lastActionSignature: '', actionItems: [],
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
 
@@ -184,7 +186,6 @@ async function handleItemAction(event) {
       showBanner('success', 'Position deleted permanently.');
     }
     if (button.dataset.action === 'monitor') {
-      if (!item.model) { showBanner('error', 'Link a model first, then use the arrow to add it to monitoring.'); return openEditor('stock', item); }
       const monitored = await api(`/catalog/items/${item.id}/monitor`, { method: 'POST' });
       showBanner('success', `${monitored.model} is active in monitoring.`);
     }
@@ -244,7 +245,8 @@ function resultCounts(row) {
   const statuses = [...row.tasks.map(item => item.status), ...Object.values(row.shops).map(item => item.status)];
   return {
     success: statuses.filter(value => value === 'SUCCESS').length,
-    failed: statuses.filter(value => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(value)).length,
+    failed: statuses.filter(value => ['FAILED', 'INCOMPLETE'].includes(value)).length,
+    notFound: statuses.filter(value => value === 'NOT_FOUND').length,
     actionRequired: statuses.filter(value => value === 'ACTION_REQUIRED').length,
     pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
   };
@@ -254,19 +256,26 @@ function statusCell(row) {
   const counts = resultCounts(row); const parts = [];
   parts.push(badge(`Success ${counts.success}`, 'success'));
   parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found'));
+  parts.push(badge(`Not found ${counts.notFound}`, 'not-found'));
   if (counts.actionRequired) parts.push(badge(`Action required ${counts.actionRequired}`, 'action-required'));
   if (counts.pending) parts.push(badge(`Pending ${counts.pending}`, 'incomplete'));
   return `<span class="status-counts">${parts.join(' ')}</span>`;
 }
 
 function lowestOffer(row, field) {
-  return row.tasks.map(task => task[field]).filter(Boolean).sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
+  const offers = row.tasks.map(task => task[field]).filter(Boolean);
+  const availability = field === 'cheapest_in_stock' ? 'IN_STOCK' : 'PRE_ORDER';
+  Object.values(row.shops).filter(item => item.status === 'SUCCESS' && item.availability === availability && item.price_eur != null).forEach(item => offers.push({
+    price_eur: item.price_eur, store: item.shop_name || item.shop_key, url: item.product_url || item.search_url
+  }));
+  return offers.sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
 }
 
 function marketplaceCell(row) {
   if (!row.tasks.length) return '—';
-  const cheapest = lowestOffer(row, 'cheapest_in_stock') || lowestOffer(row, 'cheapest_pre_order');
-  const details = row.tasks.map(task => `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)}</strong>${badge(task.status, statusClass(task.status))}<span>${escapeHtml(task.matched_title || 'No matching title')}</span><span>${offerLink(task.cheapest_in_stock || task.cheapest_pre_order)}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
+  const marketplaceLowest = field => row.tasks.map(task => task[field]).filter(Boolean).sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
+  const cheapest = marketplaceLowest('cheapest_in_stock') || marketplaceLowest('cheapest_pre_order');
+  const details = row.tasks.map(task => `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock)}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order)}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
   return `<details class="cell-details"><summary>${cheapest ? offerLink(cheapest) : `${row.tasks.length} result${row.tasks.length === 1 ? '' : 's'}`}</summary>${details}</details>`;
 }
 
@@ -300,11 +309,14 @@ function buildResultFilters(rows) {
     shop: state.sources.filter(item => item.kind === 'shop').map(item => ({ value: item.key, label: item.name }))
   };
   for (const [kind, options] of Object.entries(values)) {
+    const known = state.resultFilterKnown[kind];
     if (!state.resultFilterInitialized) options.forEach(option => state.resultFilters[kind].add(option.value));
     else {
       const allowed = new Set(options.map(option => option.value));
       [...state.resultFilters[kind]].filter(value => !allowed.has(value)).forEach(value => state.resultFilters[kind].delete(value));
+      options.filter(option => !known.has(option.value)).forEach(option => state.resultFilters[kind].add(option.value));
     }
+    state.resultFilterKnown[kind] = new Set(options.map(option => option.value));
     renderMultiFilter(`${kind}-filter`, options, state.resultFilters[kind], renderResults);
   }
   state.resultFilterInitialized = true;
@@ -321,10 +333,9 @@ function resultRowVisible(row) {
 
 function renderResults() {
   const rows = aggregateResults(); buildResultFilters(rows); const cols = columns();
-  byId('result-head').innerHTML = cols.map(col => `<th data-col="${escapeHtml(col.key)}" class="${state.hiddenColumns.has(col.key) ? 'col-hidden' : ''}">${escapeHtml(col.label)}<button class="eye-button" data-hide-column="${escapeHtml(col.key)}" title="Hide ${escapeHtml(col.label)}" aria-label="Hide ${escapeHtml(col.label)}">◉</button></th>`).join('');
+  byId('result-head').innerHTML = cols.map(col => `<th data-col="${escapeHtml(col.key)}" class="${state.hiddenColumns.has(col.key) ? 'col-hidden' : ''}">${escapeHtml(col.label)}</th>`).join('');
   renderMultiFilter('column-filter', cols.map(col => ({ value: col.key, label: col.label })), new Set(cols.filter(col => !state.hiddenColumns.has(col.key)).map(col => col.key)), () => {});
   byId('column-filter').querySelectorAll('input').forEach(input => input.addEventListener('change', () => setColumnHidden(input.value, !input.checked)));
-  byId('result-head').querySelectorAll('[data-hide-column]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); setColumnHidden(button.dataset.hideColumn, true); }));
   const cell = (key, content, extra = '') => `<td data-col="${key}" class="${extra} ${state.hiddenColumns.has(key) ? 'col-hidden' : ''}">${content}</td>`;
   byId('result-rows').innerHTML = rows.length ? rows.map(row => {
     const stockOffer = lowestOffer(row, 'cheapest_in_stock'); const preorderOffer = lowestOffer(row, 'cheapest_pre_order');
@@ -334,21 +345,66 @@ function renderResults() {
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
+function renderActionRequired(run) {
+  const items = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED');
+  state.actionItems = items;
+  const review = byId('review-actions');
+  review.hidden = items.length === 0;
+  review.textContent = items.length ? `Review required checks (${items.length})` : 'Review required checks';
+  byId('action-items').innerHTML = items.length ? items.map(item => {
+    const link = item.product_url || item.search_url;
+    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.shop_name || item.shop_key)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-retry-action data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Retry check</button></div></div>`;
+  }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
+
+  if (!items.length) {
+    state.lastActionSignature = '';
+    if (byId('action-dialog').open) byId('action-dialog').close();
+    return;
+  }
+  const signature = items.map(item => `${item.item_id}:${item.shop_key}`).sort().join('|');
+  if (run.status !== 'RUNNING' && signature !== state.lastActionSignature) {
+    state.lastActionSignature = signature;
+    if (!byId('action-dialog').open) byId('action-dialog').showModal();
+  }
+}
+
+async function handleActionDialog(event) {
+  const button = event.target.closest('[data-retry-action]');
+  if (!button || !state.currentRunId) return;
+  button.disabled = true;
+  button.textContent = 'Retrying…';
+  try {
+    await api(`/runs/${encodeURIComponent(state.currentRunId)}/shops/${button.dataset.itemId}/${encodeURIComponent(button.dataset.shopKey)}/retry`, { method: 'POST' });
+    state.lastActionSignature = '';
+    byId('action-dialog').close();
+    showBanner('success', 'The selected check is running again.');
+    await pollRun(state.currentRunId);
+    if (state.runPoll) clearInterval(state.runPoll);
+    state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Retry check';
+    showBanner('error', error.message);
+  }
+}
+
 function renderRun(run) {
+  state.currentRunId = run.id || run.run_id;
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
   const all = [...state.tasks, ...state.shopResults]; const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
-  const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(item.status)).length;
+  const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'INCOMPLETE'].includes(item.status)).length;
+  const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
   const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
   const actionText = actionRequired ? ` · Action required ${actionRequired}` : '';
-  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Failed ${failed}${actionText}` : `Completed · Success ${success} · Failed ${failed}${actionText}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults();
+  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `Completed · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); }
 }
 
 async function pollRun(runId) { try { renderRun(await api(`/runs/${runId}`)); } catch (error) { showBanner('error', error.message); } }
 async function startRun() {
-  byId('start-run').disabled = true; state.resultFilterInitialized = false; Object.values(state.resultFilters).forEach(filter => filter.clear());
+  byId('start-run').disabled = true; state.resultFilterInitialized = false; state.lastActionSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
   try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
   catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
 }
@@ -366,6 +422,8 @@ function wireEvents() {
   initializeCatalogFilters(); document.querySelectorAll('[data-add]').forEach(button => button.addEventListener('click', () => openEditor(button.dataset.add)));
   byId('source-rows').addEventListener('click', handleItemAction); byId('stock-rows').addEventListener('click', handleItemAction); byId('item-form').addEventListener('submit', saveItem);
   byId('dialog-close').addEventListener('click', () => byId('item-dialog').close()); byId('dialog-cancel').addEventListener('click', () => byId('item-dialog').close());
+  byId('action-close').addEventListener('click', () => byId('action-dialog').close()); byId('action-later').addEventListener('click', () => byId('action-dialog').close());
+  byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
