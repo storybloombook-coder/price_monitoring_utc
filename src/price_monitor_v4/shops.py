@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
 
+from .browser_bridge import BrowserBridge, BrowserBridgeTimeout, BrowserBridgeUnavailable
 from .catalog import CatalogStore, canonicalize
 from .sources import SOURCE_BY_KEY
 
@@ -297,9 +298,12 @@ async def fetch_rendered_html(url: str, timeout_seconds: float) -> str | None:
 
 
 class ShopMonitor:
-    def __init__(self, store: CatalogStore, timeout_seconds: float = 20) -> None:
+    def __init__(
+        self, store: CatalogStore, timeout_seconds: float = 20, browser_bridge: BrowserBridge | None = None
+    ) -> None:
         self.store = store
         self.timeout_seconds = timeout_seconds
+        self.browser_bridge = browser_bridge
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._browser_semaphore = asyncio.Semaphore(1)
         self._browser_blocked: set[str] = set()
@@ -344,26 +348,54 @@ class ShopMonitor:
             self.store.finish_shop_observation(run_id, model["id"], shop["key"], "NOT_FOUND", search_url=search_url)
             return
         try:
+            async def fetch_from_extension(url: str) -> tuple[str, str]:
+                if not self.browser_bridge or not self.browser_bridge.connected:
+                    raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
+                try:
+                    capture = await self.browser_bridge.capture(shop["key"], model["model"], url)
+                except (BrowserBridgeUnavailable, BrowserBridgeTimeout) as error:
+                    raise ActionRequiredError(str(error)) from error
+                rendered = str(capture.get("html") or "")
+                if capture.get("security_challenge") or not rendered or security_challenge(rendered):
+                    raise ActionRequiredError(
+                        "Complete the visible security verification in Edge, then start monitoring again"
+                    )
+                return rendered, str(capture.get("url") or url)
+
+            async def fetch_from_local_edge(url: str) -> tuple[str, str]:
+                if shop["key"] not in {"senukai", "varle"}:
+                    raise ActionRequiredError(
+                        "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
+                    )
+                async with self._browser_semaphore:
+                    if shop["key"] in self._browser_blocked:
+                        raise ActionRequiredError(
+                            "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
+                        )
+                    rendered = await renderer.fetch(url)
+                    if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
+                        self._browser_blocked.add(shop["key"])
+                        raise ActionRequiredError(
+                            "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
+                        )
+                return rendered, url
+
             async def fetch(url: str) -> tuple[str, str]:
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
-                    return response.text, str(response.url)
+                    html = response.text
+                    if security_challenge(html) or incomplete_catalog_render(html):
+                        if self.browser_bridge and self.browser_bridge.connected:
+                            return await fetch_from_extension(str(response.url))
+                        return await fetch_from_local_edge(str(response.url))
+                    return html, str(response.url)
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code not in {403, 429} or shop["key"] not in {"senukai", "varle"}:
+                    if error.response.status_code not in {403, 429}:
                         raise
-                    async with self._browser_semaphore:
-                        if shop["key"] in self._browser_blocked:
-                            raise ActionRequiredError(
-                                "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
-                            )
-                        rendered = await renderer.fetch(url)
-                        if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
-                            self._browser_blocked.add(shop["key"])
-                            raise ActionRequiredError(
-                                "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
-                            )
-                    return rendered, url
+                    if self.browser_bridge and self.browser_bridge.connected:
+                        return await fetch_from_extension(url)
+                    return await fetch_from_local_edge(url)
 
             html, resolved_url = await fetch(target_url)
             product_url = target_url

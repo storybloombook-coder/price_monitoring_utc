@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import __version__
+from .browser_bridge import BrowserBridge, EXTENSION_ORIGIN
 from .catalog import CatalogStore
 from .config import Settings
 from .legacy import LegacyService, safe_filename
@@ -34,7 +36,10 @@ def create_app(
     app_settings = settings or Settings.load()
     catalog = store or CatalogStore(app_settings.catalog_database)
     legacy_service = legacy or LegacyService(app_settings)
-    shop_monitor = ShopMonitor(catalog, float(app_settings.env.get("HTTP_TIMEOUT_SECONDS", "20")))
+    browser_bridge = BrowserBridge(float(app_settings.env.get("BROWSER_BRIDGE_TIMEOUT_SECONDS", "150")))
+    shop_monitor = ShopMonitor(
+        catalog, float(app_settings.env.get("HTTP_TIMEOUT_SECONDS", "20")), browser_bridge
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -53,13 +58,21 @@ def create_app(
             yield
         finally:
             shop_monitor.stop()
+            browser_bridge.stop()
             legacy_service.stop()
 
     app = FastAPI(title="Price Monitor v4", version=__version__, lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[EXTENSION_ORIGIN],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["content-type"],
+    )
     app.state.settings = app_settings
     app.state.catalog = catalog
     app.state.legacy = legacy_service
     app.state.shop_monitor = shop_monitor
+    app.state.browser_bridge = browser_bridge
     static_dir = Path(__file__).resolve().parent / "static"
 
     @app.get("/", include_in_schema=False)
@@ -83,8 +96,44 @@ def create_app(
             "version": __version__,
             "source_workbook": str(app_settings.active_workbook),
             "legacy_service": "running" if legacy_service.running else ("disabled" if not app_settings.legacy_enabled else "stopped"),
+            "browser_bridge": browser_bridge.status(),
             "catalog": catalog.stats(),
         }
+
+    def require_extension(request: Request) -> None:
+        if request.headers.get("origin") != EXTENSION_ORIGIN:
+            raise HTTPException(403, "Only the bundled PriceMonitor Edge extension can use this endpoint")
+
+    @app.get("/browser-bridge/status")
+    async def browser_bridge_status() -> dict[str, Any]:
+        return browser_bridge.status()
+
+    @app.post("/browser-bridge/heartbeat")
+    async def browser_bridge_heartbeat(request: Request) -> dict[str, Any]:
+        require_extension(request)
+        browser_bridge.heartbeat()
+        return browser_bridge.status()
+
+    @app.get("/browser-bridge/jobs/next")
+    async def next_browser_job(request: Request, wait_seconds: float = Query(25, ge=0, le=25)) -> Response:
+        require_extension(request)
+        job = await browser_bridge.next_job(wait_seconds)
+        return JSONResponse(job) if job else Response(status_code=204)
+
+    @app.post("/browser-bridge/jobs/{job_id}/result")
+    async def finish_browser_job(job_id: str, request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        require_extension(request)
+        html = str(payload.get("html") or "")
+        if len(html) > 8_000_000:
+            raise HTTPException(413, "Captured page is too large")
+        if not browser_bridge.submit(job_id, {
+            "html": html,
+            "url": str(payload.get("url") or ""),
+            "security_challenge": bool(payload.get("security_challenge")),
+            "error": str(payload.get("error") or "")[:500],
+        }):
+            raise HTTPException(404, "Browser job not found or already finished")
+        return {"accepted": True}
 
     @app.get("/catalog/summary")
     async def catalog_summary() -> dict[str, Any]:

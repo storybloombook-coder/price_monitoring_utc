@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from price_monitor_v4.app import create_app
+from price_monitor_v4.browser_bridge import EXTENSION_ORIGIN
 from price_monitor_v4.catalog import CatalogStore
 from price_monitor_v4.config import Settings
 
@@ -24,6 +25,11 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["version"] == "4.0.0"
+        assert health.json()["browser_bridge"]["connected"] is False
+        assert client.post("/browser-bridge/heartbeat").status_code == 403
+        heartbeat = client.post("/browser-bridge/heartbeat", headers={"origin": EXTENSION_ORIGIN})
+        assert heartbeat.status_code == 200
+        assert heartbeat.json()["connected"] is True
 
         created = client.post(
             "/catalog/items/source",

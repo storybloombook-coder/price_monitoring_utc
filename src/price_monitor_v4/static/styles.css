@@ -120,6 +120,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .empty { color: var(--muted); text-align: center; padding: 24px; }
 .marketplaces { justify-content: flex-end; }
 .source-settings { display: grid; grid-template-columns: .8fr 1.2fr; gap: 14px; margin: 4px 0 18px; }
+.browser-bridge-state { display: flex; align-items: center; gap: 8px; margin: -6px 0 14px; color: var(--muted); font-size: 12px; }
+.bridge-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 14%, transparent); }
+.browser-bridge-state.connected { color: var(--brand); }
+.browser-bridge-state.connected .bridge-dot { background: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 14%, transparent); }
 .source-settings > section { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 .source-group-heading, .country-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .source-group-heading { padding-bottom: 12px; border-bottom: 1px solid var(--line); }

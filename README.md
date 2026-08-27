@@ -11,6 +11,17 @@ Local-first Windows application for TCL marketplace and direct-shop price monito
 
 Python does not need to be installed. Keep the complete portable directory together, including `_internal` and `legacy`.
 
+### Edge extension for protected shops
+
+The portable folder includes `edge-extension`, which lets PriceMonitor use a normal Edge tab when a retailer blocks direct collection:
+
+1. Start `PriceMonitor.exe`.
+2. Open `edge://extensions` in Edge and enable **Developer mode**.
+3. Choose **Load unpacked** and select the portable folder's `edge-extension` directory.
+4. Open **PriceMonitor Browser Bridge** and confirm **Connected to PriceMonitor**.
+
+Keep Edge open during monitoring. When a retailer displays a human verification, complete it in the visible tab. The extension has a fixed identity and communicates only with the local PriceMonitor server and the configured retailer domains.
+
 ## Editable catalog
 
 After Setup, open **Position management**. The panel has two synchronized lists:
@@ -26,7 +37,7 @@ Marketplaces and shops have individual switches plus master switches for each gr
 
 The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Every column can be hidden from its header and restored from the **Columns** menu; column visibility is retained in the browser.
 
-If a retailer presents a browser security challenge, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually in the normal browser session.
+If the Edge extension is connected, protected pages are automatically delegated to a visible normal-browser tab. Without the extension, or when a human verification times out, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually.
 
 ## Configuration
 

@@ -121,6 +121,18 @@ function renderSources() {
 }
 
 async function loadSources() { state.sources = await api('/sources'); renderSources(); if (state.tasks.length || state.shopResults.length) renderResults(); }
+
+async function loadBrowserBridge() {
+  const root = byId('browser-bridge-state');
+  try {
+    const bridge = await api('/browser-bridge/status');
+    root.classList.toggle('connected', bridge.connected);
+    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? 'Edge extension connected' : 'Edge extension not connected · protected shops will require manual verification'}</span>`;
+  } catch {
+    root.classList.remove('connected');
+    root.innerHTML = '<span class="bridge-dot"></span><span>Edge extension status unavailable</span>';
+  }
+}
 async function updateSource(key, enabled) {
   try { await api(`/sources/${encodeURIComponent(key)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }); await loadSources(); }
   catch (error) { showBanner('error', error.message); await loadSources(); }
@@ -361,8 +373,8 @@ async function initialize() {
   wireEvents();
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · monitoring service ${health.legacy_service}`; byId('service-state').classList.add('ok');
-    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs()]); try { renderRun(await api('/runs/latest')); } catch { renderResults(); }
-    setInterval(loadLogs, 10000);
+    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge()]); try { renderRun(await api('/runs/latest')); } catch { renderResults(); }
+    setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }
 }
 

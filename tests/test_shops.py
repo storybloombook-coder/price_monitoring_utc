@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 
+from price_monitor_v4.browser_bridge import BrowserBridge
 from price_monitor_v4.shops import ActionRequiredError, ShopMonitor, find_product_url, incomplete_catalog_render, parse_product, security_challenge
 
 
@@ -54,3 +55,55 @@ def test_security_challenge_is_reported_as_action_required() -> None:
     args, kwargs = asyncio.run(run())
     assert args[3] == "ACTION_REQUIRED"
     assert "normal browser" in kwargs["error"]
+
+
+def test_edge_extension_completes_protected_search_and_product() -> None:
+    class Store:
+        observation = None
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> None:
+            raise AssertionError("Local CDP fallback must not run while the extension is connected")
+
+    async def run() -> tuple:
+        bridge = BrowserBridge(timeout_seconds=2)
+        bridge.heartbeat()
+        store = Store()
+        monitor = ShopMonitor(store, browser_bridge=bridge)
+        transport = httpx.MockTransport(lambda request: httpx.Response(403, request=request))
+
+        async def extension_worker() -> None:
+            search_job = await bridge.next_job(1)
+            assert search_job is not None
+            bridge.submit(search_job["id"], {
+                "url": search_job["url"],
+                "html": '<a href="https://www.varle.lt/televizoriai/tcl-55t7b.html">TCL 55T7B</a>',
+                "security_challenge": False,
+            })
+            product_job = await bridge.next_job(1)
+            assert product_job is not None
+            bridge.submit(product_job["id"], {
+                "url": product_job["url"],
+                "html": '<script type="application/ld+json">{"@type":"Product","name":"TCL 55T7B","offers":{"price":"368.99","availability":"https://schema.org/InStock"}}</script>',
+                "security_challenge": False,
+            })
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            await asyncio.gather(
+                monitor._check_one(
+                    client,
+                    Renderer(),
+                    "run-2",
+                    {"id": 8, "model": "55T7B", "shop_links": {}},
+                    {"key": "varle"},
+                ),
+                extension_worker(),
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "SUCCESS"
+    assert kwargs["price_eur"] == 368.99
