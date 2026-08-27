@@ -130,6 +130,7 @@ def create_app(
             "html": html,
             "url": str(payload.get("url") or ""),
             "security_challenge": bool(payload.get("security_challenge")),
+            "incomplete": bool(payload.get("incomplete")),
             "error": str(payload.get("error") or "")[:500],
         }):
             raise HTTPException(404, "Browser job not found or already finished")

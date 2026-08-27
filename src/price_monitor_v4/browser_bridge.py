@@ -60,6 +60,7 @@ class BrowserBridge:
             "connected": self.connected,
             "last_seen_seconds": round(age, 1) if age is not None else None,
             "pending_jobs": len(self._jobs),
+            "jobs": [job.public() for job in self._jobs.values()],
             "extension_id": EXTENSION_ID,
         }
 

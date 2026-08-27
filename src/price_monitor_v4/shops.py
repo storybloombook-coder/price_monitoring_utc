@@ -306,11 +306,13 @@ class ShopMonitor:
         self.browser_bridge = browser_bridge
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._browser_semaphore = asyncio.Semaphore(1)
-        self._extension_semaphore = asyncio.Semaphore(2)
+        self._extension_semaphore = asyncio.Semaphore(1)
         self._browser_blocked: set[str] = set()
+        self._extension_blocked: set[str] = set()
 
     def start(self, run_id: str) -> None:
         self._browser_blocked.clear()
+        self._extension_blocked.clear()
         models = [item for item in self.store.list_items("source", "active") if not item["paused"]]
         shops = [item for item in self.store.list_sources() if item["kind"] == "shop" and item["effective_enabled"]]
         self.store.start_shop_run(run_id, models, shops)
@@ -352,13 +354,19 @@ class ShopMonitor:
             async def fetch_from_extension(url: str) -> tuple[str, str]:
                 if not self.browser_bridge or not self.browser_bridge.connected:
                     raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
+                if shop["key"] in self._extension_blocked:
+                    raise ActionRequiredError("Browser verification for this shop was already blocked during this run")
                 try:
                     async with self._extension_semaphore:
+                        if shop["key"] in self._extension_blocked:
+                            raise ActionRequiredError("Browser verification for this shop was already blocked during this run")
                         capture = await self.browser_bridge.capture(shop["key"], model["model"], url)
                 except (BrowserBridgeUnavailable, BrowserBridgeTimeout) as error:
+                    self._extension_blocked.add(shop["key"])
                     raise ActionRequiredError(str(error)) from error
                 rendered = str(capture.get("html") or "")
-                if capture.get("security_challenge") or not rendered or security_challenge(rendered):
+                if capture.get("security_challenge") or capture.get("incomplete") or not rendered or security_challenge(rendered):
+                    self._extension_blocked.add(shop["key"])
                     raise ActionRequiredError(
                         "Complete the visible security verification in Edge, then start monitoring again"
                     )

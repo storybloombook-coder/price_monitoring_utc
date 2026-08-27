@@ -127,7 +127,9 @@ async function loadBrowserBridge() {
   try {
     const bridge = await api('/browser-bridge/status');
     root.classList.toggle('connected', bridge.connected);
-    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? 'Edge extension connected' : 'Edge extension not connected · protected shops will require manual verification'}</span>`;
+    const current = bridge.jobs?.[0];
+    const detail = current ? ` · checking ${current.shop_key} for ${current.model}` : '';
+    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${detail}` : 'Edge extension not connected · protected shops will require manual verification'}</span>`;
   } catch {
     root.classList.remove('connected');
     root.innerHTML = '<span class="bridge-dot"></span><span>Edge extension status unavailable</span>';

@@ -1,7 +1,8 @@
 const DEFAULT_APP_URL = 'http://127.0.0.1:8000';
 const POLL_ALARM = 'price-monitor-poll';
-const MAX_ACTIVE_JOBS = 2;
-const JOB_TIMEOUT_MS = 145000;
+const MAX_ACTIVE_JOBS = 1;
+const JOB_TIMEOUT_MS = 45000;
+const JOB_ALARM_PREFIX = 'price-monitor-job:';
 let polling = false;
 const inspecting = new Set();
 
@@ -96,6 +97,7 @@ async function removeActiveJob(jobId) {
 }
 
 async function finishJob(jobId, record, captured, closeTab) {
+  await chrome.alarms.clear(`${JOB_ALARM_PREFIX}${jobId}`);
   await submit(jobId, captured);
   await removeActiveJob(jobId);
   if (closeTab) await chrome.tabs.remove(record.tabId).catch(() => {});
@@ -152,6 +154,7 @@ async function acceptJob(job) {
   const jobs = await activeJobs();
   jobs[job.id] = { job, tabId: tab.id, startedAt: Date.now() };
   await saveActiveJobs(jobs);
+  await chrome.alarms.create(`${JOB_ALARM_PREFIX}${job.id}`, { when: Date.now() + JOB_TIMEOUT_MS });
   await setStatus('working', `Opening ${job.shop_key} for ${job.model}`, { job });
   if (tab.status === 'complete') void inspectJob(job.id);
 }
@@ -193,6 +196,10 @@ chrome.runtime.onStartup.addListener(() => {
   void resumeJobs().then(pollLoop);
 });
 chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name.startsWith(JOB_ALARM_PREFIX)) {
+    void inspectJob(alarm.name.slice(JOB_ALARM_PREFIX.length));
+    return;
+  }
   if (alarm.name === POLL_ALARM) void resumeJobs().then(pollLoop).catch(error => setStatus('disconnected', String(error)));
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -207,6 +214,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
     const match = Object.entries(jobs).find(([, record]) => record.tabId === tabId);
     if (!match) return;
     const [jobId, record] = match;
+    await chrome.alarms.clear(`${JOB_ALARM_PREFIX}${jobId}`);
     await submit(jobId, {
       url: record.job.url,
       html: '',
