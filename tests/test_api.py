@@ -42,6 +42,17 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         restored = client.post(f"/catalog/items/{item_id}/restore")
         assert restored.json()["state"] == "paused"
 
+        stock_item = client.post(
+            "/catalog/items/stock", json={"nomenclature": "TCL TV", "model": "55T7B"}
+        ).json()
+        promoted = client.post(f"/catalog/items/{stock_item['id']}/monitor")
+        assert promoted.status_code == 200
+        assert promoted.json()["model"] == "55T7B"
+
+        client.delete(f"/catalog/items/{item_id}")
+        permanent = client.delete(f"/catalog/items/{item_id}/permanent")
+        assert permanent.status_code == 204
+
         sources = client.get("/sources").json()
         assert {item["name"] for item in sources if item["kind"] == "shop"} == {
             "Senukai", "Bite", "Varle", "Elesen", "Elisa", "Euronics", "RDE", "Smartech"

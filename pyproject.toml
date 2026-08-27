@@ -9,6 +9,7 @@ dependencies = [
   "openpyxl==3.1.5",
   "python-multipart==0.0.20",
   "uvicorn[standard]==0.35.0",
+  "websockets==17.1",
 ]
 
 [project.optional-dependencies]

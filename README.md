@@ -40,7 +40,7 @@ These runtime files, the local `.env`, and the source workbook are intentionally
 
 ## Safety boundary
 
-Live marketplace collection is disabled in the example configuration (`ENABLE_LIVE_MARKETPLACES=false`). Kaina24, Salidzini, and Hinnavaatlus adapters should be enabled only after their access rules and parsers have been validated.
+Live marketplace collection is enabled by default (`ENABLE_LIVE_MARKETPLACES=true`) for Kaina24, Salidzini, and Hinnavaatlus. Individual and master switches in the application still control which sources participate in each monitoring run.
 
 ## Workflow
 

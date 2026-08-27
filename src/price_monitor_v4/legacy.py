@@ -93,7 +93,7 @@ class LegacyService:
             "SCHEDULE_TIME": inherited.get("SCHEDULE_TIME", "08:00"),
             "SCHEDULE_TIMEZONE": inherited.get("SCHEDULE_TIMEZONE", "Europe/Riga"),
             "ENABLE_SCHEDULER": "false",
-            "ENABLE_LIVE_MARKETPLACES": inherited.get("ENABLE_LIVE_MARKETPLACES", "false"),
+            "ENABLE_LIVE_MARKETPLACES": inherited.get("ENABLE_LIVE_MARKETPLACES", "true"),
             "HTTP_TIMEOUT_SECONDS": inherited.get("HTTP_TIMEOUT_SECONDS", "20"),
             "GLOBAL_CONCURRENCY": inherited.get("GLOBAL_CONCURRENCY", "3"),
             "HOST": "127.0.0.1",

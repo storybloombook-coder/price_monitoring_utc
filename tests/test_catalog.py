@@ -103,3 +103,19 @@ def test_source_toggles_and_manual_shop_links_are_persisted(tmp_path: Path) -> N
     assert senukai["enabled"] is False
     assert senukai["master_enabled"] is False
     assert senukai["effective_enabled"] is False
+
+
+def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    stock = store.create_item("stock", {"nomenclature": "TCL TV", "model": "55T7B"})
+
+    promoted = store.promote_stock_item(stock["id"])
+    assert promoted["kind"] == "source"
+    assert promoted["model"] == "55T7B"
+    assert promoted["paused"] is False
+    assert store.promote_stock_item(stock["id"])["id"] == promoted["id"]
+
+    store.trash_item(promoted["id"])
+    store.delete_item_permanently(promoted["id"])
+    with pytest.raises(KeyError):
+        store.get_item(promoted["id"])

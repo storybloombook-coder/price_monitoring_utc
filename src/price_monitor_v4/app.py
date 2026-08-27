@@ -149,6 +149,23 @@ def create_app(
         except KeyError as error:
             raise HTTPException(404, "Item not found") from error
 
+    @app.delete("/catalog/items/{item_id}/permanent", status_code=204)
+    async def delete_catalog_item_permanently(item_id: int) -> Response:
+        try:
+            catalog.delete_item_permanently(item_id)
+            return Response(status_code=204)
+        except KeyError as error:
+            raise HTTPException(404, "Only items in trash can be deleted permanently") from error
+
+    @app.post("/catalog/items/{item_id}/monitor")
+    async def promote_stock_item(item_id: int) -> dict[str, Any]:
+        try:
+            return catalog.promote_stock_item(item_id)
+        except KeyError as error:
+            raise HTTPException(404, "Active stock item not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
     @app.get("/workbook")
     async def workbook_info() -> dict[str, Any]:
         items = catalog.list_items("source", "active")

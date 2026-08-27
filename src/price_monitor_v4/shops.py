@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
 
 from .catalog import CatalogStore, canonicalize
 from .sources import SOURCE_BY_KEY
@@ -159,13 +165,131 @@ def find_product_url(html: str, base_url: str, model: str) -> str | None:
     scored: list[tuple[int, str]] = []
     for link in document.links:
         url = urljoin(base_url, link["href"])
-        if urlparse(url).netloc != host:
+        parsed = urlparse(url)
+        if parsed.netloc != host or parsed.fragment:
             continue
-        haystack = canonicalize(f"{link['text']} {url}").replace(" ", "")
+        # Do not score the search query itself: every link on ?q=55T7B would
+        # otherwise look like a model match (including "#content").
+        path = unquote(parsed.path)
+        haystack = canonicalize(f"{link['text']} {path}").replace(" ", "")
         if expected and expected in haystack:
-            score = 2 if expected in canonicalize(link["text"]).replace(" ", "") else 1
+            score = 3 if expected in canonicalize(link["text"]).replace(" ", "") else 2
+            if any(token in path.lower() for token in ("/p/", "/product", "/televizoriai/")):
+                score += 1
             scored.append((score, url))
     return max(scored, default=(0, None))[1]
+
+
+def security_challenge(html: str) -> bool:
+    lowered = html.lower()
+    return any(token in lowered for token in (
+        "performing security verification", "cf-chl-", "just a moment...", "verify you are human",
+        "attention required!", "sorry, you have been blocked"
+    ))
+
+
+def incomplete_catalog_render(html: str) -> bool:
+    lowered = html.lower()
+    return "muiskeleton" in lowered and not re.search(r'href=["\'][^"\']*/p/[^"\']+["\']', lowered)
+
+
+def edge_executable() -> Path | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/Edge/Application/msedge.exe",
+    ]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+class EdgeRenderer:
+    """Small CDP client that reuses one local headless Edge process per run."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.profile = Path(tempfile.mkdtemp(prefix="price-monitor-edge-"))
+        self.process: asyncio.subprocess.Process | None = None
+        self.port: int | None = None
+
+    async def start(self) -> bool:
+        if self.process and self.process.returncode is None and self.port:
+            return True
+        executable = edge_executable()
+        if not executable:
+            return False
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.process = await asyncio.create_subprocess_exec(
+            str(executable), "--disable-gpu", "--no-first-run", "--disable-extensions",
+            "--window-position=-32000,-32000", "--window-size=800,600",
+            "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+            "--remote-debugging-port=0", f"--user-data-dir={self.profile}", "about:blank",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            creationflags=creation_flags,
+        )
+        port_file = self.profile / "DevToolsActivePort"
+        for _ in range(80):
+            if port_file.exists():
+                lines = port_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                if lines:
+                    self.port = int(lines[0])
+                    return True
+            if self.process.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        return False
+
+    async def fetch(self, url: str) -> str | None:
+        if not await self.start() or not self.port:
+            return None
+        api_root = f"http://127.0.0.1:{self.port}"
+        target_id: str | None = None
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                target_response = await client.put(f"{api_root}/json/new?{quote(url, safe='')}")
+                target_response.raise_for_status()
+                target = target_response.json()
+            target_id = str(target["id"])
+            socket_url = str(target["webSocketDebuggerUrl"])
+            async with websocket_connect(socket_url, max_size=None, open_timeout=5, close_timeout=2) as socket:
+                # The shops render their catalog client-side after the initial load.
+                await asyncio.sleep(6)
+                command_id = 1
+                await socket.send(json.dumps({
+                    "id": command_id,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": "document.documentElement.outerHTML", "returnByValue": True},
+                }))
+                while True:
+                    message = json.loads(await asyncio.wait_for(socket.recv(), timeout=max(10.0, self.timeout_seconds)))
+                    if message.get("id") == command_id:
+                        return message.get("result", {}).get("result", {}).get("value")
+        except (httpx.HTTPError, OSError, TimeoutError, ValueError, KeyError):
+            return None
+        finally:
+            if target_id and self.port:
+                try:
+                    async with httpx.AsyncClient(timeout=3) as client:
+                        await client.get(f"{api_root}/json/close/{target_id}")
+                except httpx.HTTPError:
+                    pass
+
+    async def close(self) -> None:
+        if self.process and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+        shutil.rmtree(self.profile, ignore_errors=True)
+
+
+async def fetch_rendered_html(url: str, timeout_seconds: float) -> str | None:
+    renderer = EdgeRenderer(timeout_seconds)
+    try:
+        return await renderer.fetch(url)
+    finally:
+        await renderer.close()
 
 
 class ShopMonitor:
@@ -173,8 +297,11 @@ class ShopMonitor:
         self.store = store
         self.timeout_seconds = timeout_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._browser_semaphore = asyncio.Semaphore(1)
+        self._browser_blocked: set[str] = set()
 
     def start(self, run_id: str) -> None:
+        self._browser_blocked.clear()
         models = [item for item in self.store.list_items("source", "active") if not item["paused"]]
         shops = [item for item in self.store.list_sources() if item["kind"] == "shop" and item["effective_enabled"]]
         self.store.start_shop_run(run_id, models, shops)
@@ -183,6 +310,7 @@ class ShopMonitor:
 
     async def _run(self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]) -> None:
         semaphore = asyncio.Semaphore(4)
+        renderer = EdgeRenderer(self.timeout_seconds)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -191,12 +319,18 @@ class ShopMonitor:
         async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
             async def one(model: dict[str, Any], shop: dict[str, Any]) -> None:
                 async with semaphore:
-                    await self._check_one(client, run_id, model, shop)
-            await asyncio.gather(*(one(model, shop) for model in models for shop in shops))
+                    await self._check_one(client, renderer, run_id, model, shop)
+            jobs = [(model, shop) for model in models for shop in shops]
+            # Direct links are the fastest and most reliable checks, so process them first.
+            jobs.sort(key=lambda pair: (not bool((pair[0].get("shop_links") or {}).get(pair[1]["key"])), pair[1]["sort_order"]))
+            try:
+                await asyncio.gather(*(one(model, shop) for model, shop in jobs))
+            finally:
+                await renderer.close()
         self._tasks.pop(run_id, None)
 
     async def _check_one(
-        self, client: httpx.AsyncClient, run_id: str, model: dict[str, Any], shop: dict[str, Any]
+        self, client: httpx.AsyncClient, renderer: EdgeRenderer, run_id: str, model: dict[str, Any], shop: dict[str, Any]
     ) -> None:
         source = SOURCE_BY_KEY[shop["key"]]
         manual_url = (model.get("shop_links") or {}).get(shop["key"])
@@ -206,16 +340,33 @@ class ShopMonitor:
             self.store.finish_shop_observation(run_id, model["id"], shop["key"], "NOT_FOUND", search_url=search_url)
             return
         try:
-            response = await client.get(target_url)
-            response.raise_for_status()
-            product_url = target_url
-            parsed = parse_product(response.text, str(response.url), model["model"])
-            if not manual_url and parsed is None:
-                product_url = find_product_url(response.text, str(response.url), model["model"]) or ""
-                if product_url:
-                    response = await client.get(product_url)
+            async def fetch(url: str) -> tuple[str, str]:
+                try:
+                    response = await client.get(url)
                     response.raise_for_status()
-                    parsed = parse_product(response.text, str(response.url), model["model"])
+                    return response.text, str(response.url)
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code not in {403, 429} or shop["key"] not in {"senukai", "varle"}:
+                        raise
+                    async with self._browser_semaphore:
+                        if shop["key"] in self._browser_blocked:
+                            raise
+                        rendered = await renderer.fetch(url)
+                        if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
+                            self._browser_blocked.add(shop["key"])
+                            raise ValueError("Site security verification blocked automated access")
+                    return rendered, url
+
+            html, resolved_url = await fetch(target_url)
+            product_url = target_url
+            if manual_url:
+                parsed = parse_product(html, resolved_url, model["model"])
+            else:
+                product_url = find_product_url(html, resolved_url, model["model"]) or ""
+                parsed = None
+                if product_url:
+                    product_html, product_resolved_url = await fetch(product_url)
+                    parsed = parse_product(product_html, product_resolved_url, model["model"])
             if parsed:
                 self.store.finish_shop_observation(
                     run_id, model["id"], shop["key"], "SUCCESS", search_url=search_url, **parsed
@@ -225,7 +376,7 @@ class ShopMonitor:
                     run_id, model["id"], shop["key"], "NOT_FOUND", product_url=product_url or None,
                     search_url=search_url, error="No matching product price was found"
                 )
-        except (httpx.HTTPError, ValueError) as error:
+        except (httpx.HTTPError, ValueError, OSError) as error:
             self.store.finish_shop_observation(
                 run_id, model["id"], shop["key"], "FAILED", product_url=manual_url,
                 search_url=search_url, error=str(error)[:500]

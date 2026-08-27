@@ -40,7 +40,8 @@ function itemStatus(item) {
 }
 
 function actionButtons(item) {
-  if (item.state === 'trash') return `<button class="link-action" data-action="restore" data-id="${item.id}">Restore</button>`;
+  if (item.state === 'trash') return `<button class="link-action" data-action="restore" data-id="${item.id}">Restore</button>
+    <button class="link-action danger" data-action="delete-permanently" data-id="${item.id}">Delete permanently</button>`;
   return `<button class="link-action" data-action="edit" data-id="${item.id}">Edit</button>
     <button class="link-action" data-action="pause" data-id="${item.id}">${item.paused ? 'Resume' : 'Pause'}</button>
     <button class="link-action danger" data-action="trash" data-id="${item.id}">Trash</button>`;
@@ -58,8 +59,8 @@ function renderSource() {
 
 function renderStock() {
   const items = filteredCatalog('stock');
-  byId('stock-rows').innerHTML = items.length ? items.map(item => `<tr><td><span class="item-primary">${escapeHtml(item.nomenclature)}</span>
-    <span class="item-secondary">${escapeHtml(item.model || 'No linked model')} · ${escapeHtml(item.warehouse || 'No warehouse')}</span></td>
+  byId('stock-rows').innerHTML = items.length ? items.map(item => `<tr><td><div class="stock-position">${item.state === 'trash' ? '' : `<button class="monitor-arrow" data-action="monitor" data-id="${item.id}" title="Add to monitoring" aria-label="Add ${escapeHtml(item.model || item.nomenclature)} to monitoring">←</button>`}<span><span class="item-primary">${escapeHtml(item.nomenclature)}</span>
+    <span class="item-secondary">${escapeHtml(item.model || 'No linked model')} · ${escapeHtml(item.warehouse || 'No warehouse')}</span></span></div></td>
     <td>${Number(item.quantity || 0).toLocaleString('en-US')} units<span class="item-secondary">${Number(item.unit_cost_eur || 0).toFixed(2)} EUR</span></td>
     <td>${itemStatus(item)} ${item.state !== 'trash' && !item.matched ? badge('Unmatched', 'unmatched') : ''}</td><td>${actionButtons(item)}</td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No positions found.</td></tr>';
@@ -68,7 +69,7 @@ function renderStock() {
 function renderSummary() {
   if (!state.summary) return;
   const s = state.summary.source; const w = state.summary.stock;
-  byId('catalog-summary').textContent = `Source: ${s.active} active, ${s.paused} paused · Stock: ${w.active} active, ${w.unmatched} unmatched`;
+  byId('catalog-summary').textContent = `Monitoring: ${s.active} active, ${s.paused} paused · Stock: ${w.active} active, ${w.unmatched} unmatched`;
   byId('source-model-options').innerHTML = state.sourceOptions.filter(item => item.state !== 'trash').map(item => `<option value="${escapeHtml(item.model)}"></option>`).join('');
 }
 
@@ -163,6 +164,16 @@ async function handleItemAction(event) {
     if (button.dataset.action === 'pause') await api(`/catalog/items/${item.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: !item.paused }) });
     if (button.dataset.action === 'trash') await api(`/catalog/items/${item.id}`, { method: 'DELETE' });
     if (button.dataset.action === 'restore') await api(`/catalog/items/${item.id}/restore`, { method: 'POST' });
+    if (button.dataset.action === 'delete-permanently') {
+      if (!window.confirm('Delete this position permanently? This cannot be undone.')) return;
+      await api(`/catalog/items/${item.id}/permanent`, { method: 'DELETE' });
+      showBanner('success', 'Position deleted permanently.');
+    }
+    if (button.dataset.action === 'monitor') {
+      if (!item.model) { showBanner('error', 'Link a model first, then use the arrow to add it to monitoring.'); return openEditor('stock', item); }
+      const monitored = await api(`/catalog/items/${item.id}/monitor`, { method: 'POST' });
+      showBanner('success', `${monitored.model} is active in monitoring.`);
+    }
     await loadCatalog(); await loadSetupStatus();
   } catch (error) { showBanner('error', error.message); }
 }
@@ -212,6 +223,23 @@ function rowStatus(row) {
   if (statuses.some(value => value === 'FAILED')) return 'FAILED';
   if (statuses.some(value => value === 'INCOMPLETE')) return 'INCOMPLETE';
   return statuses.length ? 'NOT_FOUND' : 'NOT_STARTED';
+}
+
+function resultCounts(row) {
+  const statuses = [...row.tasks.map(item => item.status), ...Object.values(row.shops).map(item => item.status)];
+  return {
+    success: statuses.filter(value => value === 'SUCCESS').length,
+    failed: statuses.filter(value => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(value)).length,
+    pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
+  };
+}
+
+function statusCell(row) {
+  const counts = resultCounts(row); const parts = [];
+  parts.push(badge(`Success ${counts.success}`, 'success'));
+  parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found'));
+  if (counts.pending) parts.push(badge(`Pending ${counts.pending}`, 'incomplete'));
+  return `<span class="status-counts">${parts.join(' ')}</span>`;
 }
 
 function lowestOffer(row, field) {
@@ -284,16 +312,17 @@ function renderResults() {
     const stockOffer = lowestOffer(row, 'cheapest_in_stock'); const preorderOffer = lowestOffer(row, 'cheapest_pre_order');
     const best = stockOffer || preorderOffer; const margin = best && row.stockCost != null ? Number(best.price_eur) - Number(row.stockCost) : null;
     const shopCells = state.sources.filter(item => item.kind === 'shop').map(shop => cell(`shop-${shop.key}`, shopCell(row, shop), 'shop-cell')).join('');
-    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${cell('marketplaces', marketplaceCell(row), 'source-cell')}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', badge(rowStatus(row), statusClass(rowStatus(row))))}</tr>`;
+    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${cell('marketplaces', marketplaceCell(row), 'source-cell')}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
 function renderRun(run) {
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
   const all = [...state.tasks, ...state.shopResults]; const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
+  const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(item.status)).length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
-  byId('run-state').textContent = run.status === 'RUNNING' ? 'Monitoring in progress…' : 'Latest monitoring completed.'; byId('start-run').disabled = run.status === 'RUNNING'; renderResults();
+  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Failed ${failed}` : `Completed · Success ${success} · Failed ${failed}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults();
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); }
 }
 

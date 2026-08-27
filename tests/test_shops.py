@@ -1,4 +1,4 @@
-from price_monitor_v4.shops import find_product_url, parse_product
+from price_monitor_v4.shops import find_product_url, incomplete_catalog_render, parse_product, security_challenge
 
 
 def test_product_json_ld_and_search_link_parsing() -> None:
@@ -14,3 +14,8 @@ def test_product_json_ld_and_search_link_parsing() -> None:
 
     search_html = '<a href="/products/tcl-55p7l">TCL television 55P7L</a>'
     assert find_product_url(search_html, "https://shop.example/search?q=55P7L", "55P7L") == "https://shop.example/products/tcl-55p7l"
+
+    unrelated = '<a href="#content">Skip</a><a href="/other">Other</a>'
+    assert find_product_url(unrelated, "https://shop.example/search?q=55P7L", "55P7L") is None
+    assert security_challenge("<title>Just a moment...</title><p>Performing security verification</p>")
+    assert incomplete_catalog_render('<span class="MuiSkeleton-root"></span>')

@@ -362,6 +362,49 @@ class CatalogStore:
                 raise KeyError(item_id)
         return self.get_item(item_id)
 
+    def delete_item_permanently(self, item_id: int) -> None:
+        """Permanently remove an item that has already been moved to trash."""
+        with self._lock, self.connect() as db:
+            item = db.execute(
+                "SELECT id FROM catalog_items WHERE id=? AND deleted_at IS NOT NULL", (item_id,)
+            ).fetchone()
+            if not item:
+                raise KeyError(item_id)
+            # Historical observations reference catalog items without ON DELETE CASCADE.
+            db.execute("DELETE FROM shop_observations WHERE item_id=?", (item_id,))
+            db.execute("DELETE FROM catalog_items WHERE id=?", (item_id,))
+
+    def promote_stock_item(self, item_id: int) -> dict[str, Any]:
+        """Create, restore, or reactivate a monitoring model from a stock item."""
+        stock = self.get_item(item_id)
+        if stock["kind"] != "stock" or stock["deleted_at"]:
+            raise KeyError(item_id)
+        model = str(stock.get("model") or "").strip()
+        if not model:
+            raise ValueError("Link a model to this stock item before adding it to monitoring")
+        canonical = canonicalize(model)
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            existing = db.execute(
+                "SELECT id, deleted_at FROM catalog_items WHERE kind='source' AND canonical_model=? "
+                "ORDER BY deleted_at IS NULL DESC, id DESC LIMIT 1",
+                (canonical,),
+            ).fetchone()
+            if existing:
+                db.execute(
+                    "UPDATE catalog_items SET deleted_at=NULL, paused=0, updated_at=? WHERE id=?",
+                    (now, existing["id"]),
+                )
+                source_id = int(existing["id"])
+            else:
+                cursor = db.execute(
+                    "INSERT INTO catalog_items(kind, model, canonical_model, source_sheets, origin, paused, created_at, updated_at) "
+                    "VALUES('source', ?, ?, ?, 'manual', 0, ?, ?)",
+                    (model, canonical, json.dumps(["TV"]), now, now),
+                )
+                source_id = int(cursor.lastrowid)
+        return self.get_item(source_id)
+
     def import_source_workbook(self, path: Path, filename: str) -> dict[str, Any]:
         workbook = load_workbook(path, data_only=True, read_only=True)
         parsed: dict[str, dict[str, Any]] = {}

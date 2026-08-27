@@ -23,7 +23,7 @@
       <summary class="collapse-summary">
         <span><span class="eyebrow">STEP 1</span><strong>Setup</strong></span>
         <span class="summary-text">Import source and stock workbooks</span>
-        <span class="collapse-button" aria-hidden="true"><span>⌄</span></span>
+        <span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
       </summary>
       <div class="collapse-content setup-grid">
         <article class="upload-panel">
@@ -43,7 +43,7 @@
       <summary class="collapse-summary">
         <span><span class="eyebrow">STEP 2</span><strong>Position management</strong></span>
         <span id="catalog-summary" class="summary-text">Loading…</span>
-        <span class="collapse-button" aria-hidden="true"><span>⌄</span></span>
+        <span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span>
       </summary>
       <div class="catalog-intro"><p>Edit recognized items, pause monitoring or move items to the trash.</p></div>
       <div class="catalog-grid">
@@ -85,7 +85,7 @@
     <input id="item-id" type="hidden"><input id="item-kind" type="hidden">
     <div id="source-fields" class="form-grid">
       <label class="wide">Model<input id="source-model" autocomplete="off" placeholder="For example, 55P7L"></label>
-      <fieldset class="wide sheet-options"><legend>Source workbook sections</legend><label><input type="checkbox" name="source-sheet" value="TV"> TV</label><label><input type="checkbox" name="source-sheet" value="SB"> SB</label><label><input type="checkbox" name="source-sheet" value="Monitors"> Monitors</label></fieldset>
+      <fieldset class="wide sheet-options"><legend>Product categories</legend><p class="field-help">Select where this model belongs: televisions, soundbars or monitors. These categories match the Excel workbook sheets.</p><label><input type="checkbox" name="source-sheet" value="TV"> TV</label><label><input type="checkbox" name="source-sheet" value="SB"> Soundbars</label><label><input type="checkbox" name="source-sheet" value="Monitors"> Monitors</label></fieldset>
       <fieldset class="wide shop-link-fields"><legend>Direct shop links <span class="muted">(optional overrides)</span></legend><div id="shop-link-inputs" class="shop-link-grid"></div></fieldset>
     </div>
     <div id="stock-fields" class="form-grid" hidden>
