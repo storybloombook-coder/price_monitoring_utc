@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from price_monitor_v4.app import create_app
 from price_monitor_v4.catalog import CatalogStore
@@ -40,3 +41,24 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
 
         restored = client.post(f"/catalog/items/{item_id}/restore")
         assert restored.json()["state"] == "paused"
+
+        sources = client.get("/sources").json()
+        assert {item["name"] for item in sources if item["kind"] == "shop"} == {
+            "Senukai", "Bite", "Varle", "Elesen", "Elisa", "Euronics", "RDE", "Smartech"
+        }
+        client.patch("/sources/master/marketplace", json={"enabled": False})
+        client.patch("/sources/master/shop", json={"enabled": False})
+        started = client.post("/runs", json={})
+        assert started.status_code == 200
+        run = client.get(f"/runs/{started.json()['run_id']}").json()
+        assert run["status"] == "COMPLETE"
+        assert run["tasks"] == []
+        assert run["shop_results"] == []
+        export_path = Path(run["export_path"])
+        assert export_path.exists()
+        workbook = load_workbook(export_path, read_only=True)
+        headers = [cell.value for cell in next(workbook["Monitoring summary"].iter_rows())]
+        assert headers[3:12] == [
+            "Lowest pre-order", "Senukai", "Bite", "Varle", "Elesen",
+            "Elisa", "Euronics", "RDE", "Smartech",
+        ]

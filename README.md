@@ -1,10 +1,10 @@
 # Price Monitor 4.0.0
 
-Local-first Windows application for daily TCL marketplace price monitoring. Version 4 adds an editable catalog for monitored models and stock positions while preserving Excel import, SQLite history, marketplace checks, and versioned exports.
+Local-first Windows application for TCL marketplace and direct-shop price monitoring. Version 4 adds an editable catalog, per-source controls, compact model-level results, and direct retailer checks while preserving Excel import and local SQLite history.
 
 ## Run
 
-1. Download and unpack the v4 portable archive.
+1. Open the v4 portable folder.
 2. Copy `.env.example` to `.env` and adjust the settings if needed.
 3. Run `PriceMonitor.exe`.
 4. The application opens <http://127.0.0.1:8000/> automatically. API documentation is available at <http://127.0.0.1:8000/docs>.
@@ -13,12 +13,18 @@ Python does not need to be installed. Keep the complete portable directory toget
 
 ## Editable catalog
 
-After Setup, open **Управление позициями**. The panel has two synchronized lists:
+After Setup, open **Position management**. The panel has two synchronized lists:
 
-- **Source / Мониторинг** — models included in marketplace checks;
-- **Stock / Склад** — inventory, warehouse, quantity, unit cost, and linked model.
+- **Source / Monitoring models** — models included in monitoring checks;
+- **Stock / Warehouse stock** — inventory, warehouse, quantity, unit cost, and linked model.
 
 Both lists support manual creation, editing, search, pause/resume, soft deletion to trash, and restoration. Paused and trashed items are excluded from new monitoring runs. Excel upload remains available for bulk import; manually edited items are preserved as manual records.
+
+## Monitoring sources and results
+
+Marketplaces and shops have individual switches plus master switches for each group. Shops are grouped by Lithuania, Latvia, and Estonia. A model can use automatic shop search or an optional direct product URL saved in its editor.
+
+The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Every column can be hidden from its header and restored from the **Columns** menu; column visibility is retained in the browser.
 
 ## Configuration
 
@@ -51,5 +57,7 @@ Live marketplace collection is disabled in the example configuration (`ENABLE_LI
 ./run-v4.ps1 -Test
 ./build-v4.ps1
 ```
+
+The default build command updates `dist/PriceMonitor-v4.0.0-windows-x64-portable` and does not create a ZIP file. Use `./build-v4.ps1 -Archive` only when an archive is explicitly needed.
 
 The Python source for the v4 catalog, API, launcher, and interface is reproducible from this repository. Marketplace collection is temporarily delegated to the supplied v3 executable in an isolated internal service because the original v3 adapter source was not present in the supplied folder.

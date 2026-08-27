@@ -84,3 +84,22 @@ def test_prepare_legacy_filters_paused_and_trashed_items(tmp_path: Path) -> None
     with sqlite3.connect(legacy_db) as db:
         rows = db.execute("SELECT nomenclature, canonical_model FROM stock_items").fetchall()
     assert rows == [(stock["nomenclature"], "55P7L")]
+
+
+def test_source_toggles_and_manual_shop_links_are_persisted(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    item = store.create_item(
+        "source",
+        {"model": "55P7L", "shop_links": {"varle": "https://www.varle.lt/example.html"}},
+    )
+    assert item["shop_links"] == {"varle": "https://www.varle.lt/example.html"}
+
+    store.update_item(item["id"], {"shop_links": {"elesen": "https://www.elesen.lt/example"}})
+    assert store.get_item(item["id"])["shop_links"] == {"elesen": "https://www.elesen.lt/example"}
+
+    store.update_source("senukai", False)
+    store.update_source_master("shop", False)
+    senukai = next(source for source in store.list_sources() if source["key"] == "senukai")
+    assert senukai["enabled"] is False
+    assert senukai["master_enabled"] is False
+    assert senukai["effective_enabled"] is False

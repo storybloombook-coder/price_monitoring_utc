@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,8 @@ from . import __version__
 from .catalog import CatalogStore
 from .config import Settings
 from .legacy import LegacyService, safe_filename
+from .shops import ShopMonitor
+from .exporter import write_monitoring_export
 
 
 def timestamped_upload(directory: Path, category: str, original_name: str) -> Path:
@@ -31,6 +34,7 @@ def create_app(
     app_settings = settings or Settings.load()
     catalog = store or CatalogStore(app_settings.catalog_database)
     legacy_service = legacy or LegacyService(app_settings)
+    shop_monitor = ShopMonitor(catalog, float(app_settings.env.get("HTTP_TIMEOUT_SECONDS", "20")))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -48,12 +52,14 @@ def create_app(
         try:
             yield
         finally:
+            shop_monitor.stop()
             legacy_service.stop()
 
     app = FastAPI(title="Price Monitor v4", version=__version__, lifespan=lifespan)
     app.state.settings = app_settings
     app.state.catalog = catalog
     app.state.legacy = legacy_service
+    app.state.shop_monitor = shop_monitor
     static_dir = Path(__file__).resolve().parent / "static"
 
     @app.get("/", include_in_schema=False)
@@ -83,6 +89,24 @@ def create_app(
     @app.get("/catalog/summary")
     async def catalog_summary() -> dict[str, Any]:
         return catalog.stats()
+
+    @app.get("/sources")
+    async def sources() -> list[dict[str, Any]]:
+        return catalog.list_sources()
+
+    @app.patch("/sources/{key}")
+    async def update_source(key: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return catalog.update_source(key, bool(payload.get("enabled")))
+        except KeyError as error:
+            raise HTTPException(404, "Monitoring source not found") from error
+
+    @app.patch("/sources/master/{kind}")
+    async def update_source_master(kind: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return catalog.update_source_master(kind, bool(payload.get("enabled")))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
 
     @app.get("/catalog/items")
     async def catalog_items(
@@ -210,22 +234,85 @@ def create_app(
         response_headers = {"content-disposition": disposition} if disposition else None
         return Response(response.content, status_code=response.status_code, media_type=content_type, headers=response_headers)
 
+    async def legacy_json(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not legacy_service.running:
+            raise HTTPException(503, "The marketplace service is unavailable")
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                response = await client.request(method, f"{legacy_service.base_url}{path}", json=payload)
+                response.raise_for_status()
+                return response.json()
+            except (httpx.HTTPError, ValueError) as error:
+                raise HTTPException(502, f"Marketplace service error: {error}") from error
+
+    def marketplace_allowed(name: str, allowed: list[str]) -> bool:
+        normalized = name.lower().replace(".", "")
+        return any(key.replace(".", "") in normalized for key in allowed)
+
+    async def merged_run(run_id: str) -> dict[str, Any]:
+        session = catalog.monitoring_session(run_id)
+        if not session:
+            return await legacy_json("GET", f"/runs/{run_id}")
+        if session["legacy_started"]:
+            run = await legacy_json("GET", f"/runs/{run_id}")
+            run["tasks"] = [
+                task for task in run.get("tasks", [])
+                if marketplace_allowed(str(task.get("marketplace", "")), session["marketplace_keys"])
+            ]
+        else:
+            run = {
+                "id": run_id,
+                "run_id": run_id,
+                "trigger": "manual",
+                "status": "COMPLETE",
+                "tasks": [],
+                "started_at": session["created_at"],
+            }
+        shop = catalog.shop_run(run_id)
+        run["shop_results"] = shop["results"]
+        if shop["status"] == "RUNNING" or run.get("status") == "RUNNING":
+            run["status"] = "RUNNING"
+        elif run.get("status") not in {"FAILED", "INCOMPLETE"}:
+            run["status"] = "COMPLETE"
+        if run["status"] != "RUNNING":
+            export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+            if not export_path.exists():
+                write_monitoring_export(export_path, run, catalog.list_items("source", "active"))
+            run["export_path"] = str(export_path)
+        return run
+
     @app.get("/marketplaces")
-    async def marketplaces() -> Response:
-        return await proxy("GET", "/marketplaces")
+    async def marketplaces() -> list[dict[str, Any]]:
+        return [source for source in catalog.list_sources() if source["kind"] == "marketplace"]
 
     @app.post("/runs")
-    async def start_run(payload: dict[str, Any] = Body(default={})) -> Response:
+    async def start_run(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
         catalog.prepare_legacy(app_settings.original_database, app_settings.legacy_database, app_settings.active_workbook)
-        return await proxy("POST", "/runs", __import__("json").dumps(payload).encode())
+        sources = catalog.list_sources()
+        marketplaces = [source["key"] for source in sources if source["kind"] == "marketplace" and source["effective_enabled"]]
+        if marketplaces:
+            legacy_run = await legacy_json("POST", "/runs", payload)
+            run_id = str(legacy_run.get("run_id") or legacy_run.get("id"))
+            if not run_id or run_id == "None":
+                raise HTTPException(502, "Marketplace service returned no run ID")
+            legacy_started = True
+        else:
+            run_id = f"v4-{uuid.uuid4()}"
+            legacy_started = False
+        catalog.register_monitoring_session(run_id, legacy_started, marketplaces)
+        shop_monitor.start(run_id)
+        return JSONResponse({"run_id": run_id, "status": "RUNNING"})
 
     @app.get("/runs/latest")
-    async def latest_run() -> Response:
-        return await proxy("GET", "/runs/latest")
+    async def latest_run() -> JSONResponse:
+        session = catalog.latest_monitoring_session()
+        if session:
+            return JSONResponse(await merged_run(session["run_id"]))
+        return JSONResponse(await legacy_json("GET", "/runs/latest"))
 
     @app.get("/runs/{run_id}")
-    async def run_status(run_id: str) -> Response:
-        return await proxy("GET", f"/runs/{run_id}")
+    async def run_status(run_id: str) -> JSONResponse:
+        return JSONResponse(await merged_run(run_id))
 
     @app.get("/history")
     async def history(limit: int = 100) -> Response:
@@ -236,15 +323,26 @@ def create_app(
         return await proxy("GET", f"/logs?limit={limit}")
 
     @app.get("/exports")
-    async def exports(limit: int = 10) -> Response:
-        return await proxy("GET", f"/exports?limit={limit}")
+    async def exports(limit: int = 10) -> list[dict[str, Any]]:
+        app_settings.exports_dir.mkdir(parents=True, exist_ok=True)
+        files = sorted(app_settings.exports_dir.glob("*.xlsx"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return [
+            {"filename": path.name, "size_bytes": path.stat().st_size, "modified_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()}
+            for path in files[: max(0, min(limit, 100))]
+        ]
 
     @app.get("/exports/latest")
-    async def latest_export() -> Response:
-        return await proxy("GET", "/exports/latest")
+    async def latest_export() -> FileResponse:
+        items = await exports(1)
+        if not items:
+            raise HTTPException(404, "No exports found")
+        return FileResponse(app_settings.exports_dir / items[0]["filename"], filename=items[0]["filename"])
 
     @app.get("/exports/file/{filename}")
-    async def export_file(filename: str) -> Response:
-        return await proxy("GET", f"/exports/file/{safe_filename(filename)}")
+    async def export_file(filename: str) -> FileResponse:
+        path = app_settings.exports_dir / safe_filename(filename)
+        if not path.exists() or path.suffix.lower() != ".xlsx":
+            raise HTTPException(404, "Export not found")
+        return FileResponse(path, filename=path.name)
 
     return app

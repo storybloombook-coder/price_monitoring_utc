@@ -1,6 +1,9 @@
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$Archive
 )
+
+$ErrorActionPreference = 'Stop'
 
 $pmRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pmPython = Join-Path $pmRoot '.venv\Scripts\python.exe'
@@ -25,11 +28,13 @@ Push-Location $pmRoot
 try {
     if (-not $SkipTests) {
         $env:PYTHONPATH = Join-Path $pmRoot 'src'
-        & $pmPython -m pytest -q
+        & $pmPython -m pytest -q --basetemp (Join-Path $pmBuildRoot 'pytest-temp') -p no:cacheprovider
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
     }
 
-    foreach ($pmTarget in @($pmBuildRoot, $pmPortableRoot, $pmArchive)) {
+    $pmCleanupTargets = @($pmBuildRoot)
+    if ($Archive) { $pmCleanupTargets += $pmArchive }
+    foreach ($pmTarget in $pmCleanupTargets) {
         if (Test-Path -LiteralPath $pmTarget) {
             $pmResolvedTarget = [IO.Path]::GetFullPath($pmTarget)
             $pmResolvedRoot = [IO.Path]::GetFullPath($pmRoot)
@@ -62,7 +67,16 @@ try {
         (Join-Path $pmRoot 'launcher_entry.py')
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
 
-    Copy-Item -LiteralPath (Join-Path $pmPyInstallerDist 'PriceMonitor') -Destination $pmPortableRoot -Recurse
+    New-Item -ItemType Directory -Path $pmPortableRoot -Force | Out-Null
+    foreach ($pmBuildAsset in @('PriceMonitor.exe', '_internal', 'legacy', 'README.md', '.env.example')) {
+        $pmAssetPath = Join-Path $pmPortableRoot $pmBuildAsset
+        if (Test-Path -LiteralPath $pmAssetPath) {
+            Remove-Item -LiteralPath $pmAssetPath -Recurse -Force
+        }
+    }
+
+    Get-ChildItem -LiteralPath (Join-Path $pmPyInstallerDist 'PriceMonitor') -Force |
+        Copy-Item -Destination $pmPortableRoot -Recurse -Force
     $pmLegacyRoot = Join-Path $pmPortableRoot 'legacy'
     New-Item -ItemType Directory -Path $pmLegacyRoot | Out-Null
     Copy-Item -LiteralPath (Join-Path $pmRoot 'PriceMonitor.exe') -Destination (Join-Path $pmLegacyRoot 'PriceMonitor-v3.exe')
@@ -70,14 +84,18 @@ try {
     Copy-Item -LiteralPath (Join-Path $pmRoot 'README.md') -Destination $pmPortableRoot
     Copy-Item -LiteralPath (Join-Path $pmRoot '.env.example') -Destination $pmPortableRoot
 
-    Compress-Archive -LiteralPath $pmPortableRoot -DestinationPath $pmArchive -CompressionLevel Optimal
-    $pmHash = Get-FileHash -LiteralPath $pmArchive -Algorithm SHA256
-    [PSCustomObject]@{
+    $pmResult = [ordered]@{
         Executable = Join-Path $pmPortableRoot 'PriceMonitor.exe'
-        Archive = $pmArchive
-        SizeMB = [math]::Round((Get-Item -LiteralPath $pmArchive).Length / 1MB, 2)
-        SHA256 = $pmHash.Hash
-    } | Format-List
+        PortableFolder = $pmPortableRoot
+    }
+    if ($Archive) {
+        Compress-Archive -LiteralPath $pmPortableRoot -DestinationPath $pmArchive -CompressionLevel Optimal
+        $pmHash = Get-FileHash -LiteralPath $pmArchive -Algorithm SHA256
+        $pmResult.Archive = $pmArchive
+        $pmResult.ArchiveSizeMB = [math]::Round((Get-Item -LiteralPath $pmArchive).Length / 1MB, 2)
+        $pmResult.ArchiveSHA256 = $pmHash.Hash
+    }
+    [PSCustomObject]$pmResult | Format-List
 } finally {
     Pop-Location
 }

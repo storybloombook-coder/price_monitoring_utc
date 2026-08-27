@@ -12,6 +12,8 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
 
+from .sources import SOURCES
+
 
 SOURCE_SHEETS = ("TV", "SB", "Monitors")
 
@@ -80,8 +82,52 @@ class CatalogStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS monitoring_sources (
+                    key TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('marketplace', 'shop')),
+                    country TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS item_shop_links (
+                    item_id INTEGER NOT NULL REFERENCES catalog_items(id) ON DELETE CASCADE,
+                    shop_key TEXT NOT NULL REFERENCES monitoring_sources(key),
+                    product_url TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(item_id, shop_key)
+                );
+                CREATE TABLE IF NOT EXISTS monitoring_sessions (
+                    run_id TEXT PRIMARY KEY,
+                    legacy_started INTEGER NOT NULL,
+                    marketplace_keys TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS shop_observations (
+                    run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
+                    item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+                    shop_key TEXT NOT NULL REFERENCES monitoring_sources(key),
+                    status TEXT NOT NULL,
+                    title TEXT,
+                    price_eur REAL,
+                    availability TEXT,
+                    product_url TEXT,
+                    search_url TEXT,
+                    error TEXT,
+                    checked_at TEXT,
+                    PRIMARY KEY(run_id, item_id, shop_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
                 """
             )
+            for order, source in enumerate(SOURCES):
+                db.execute(
+                    "INSERT INTO monitoring_sources(key, name, kind, country, base_url, enabled, sort_order) "
+                    "VALUES(?, ?, ?, ?, ?, 1, ?) ON CONFLICT(key) DO UPDATE SET name=excluded.name, "
+                    "kind=excluded.kind, country=excluded.country, base_url=excluded.base_url, sort_order=excluded.sort_order",
+                    (source.key, source.name, source.kind, source.country, source.base_url, order),
+                )
 
     def _set_meta(self, db: sqlite3.Connection, key: str, value: Any) -> None:
         db.execute(
@@ -148,7 +194,27 @@ class CatalogStore:
         item["state"] = "trash" if item["deleted_at"] else ("paused" if item["paused"] else "active")
         if item["kind"] == "stock":
             item["matched"] = bool(item["canonical_model"] and item["canonical_model"] in active_models)
+        else:
+            with self.connect() as db:
+                item["shop_links"] = {
+                    result["shop_key"]: result["product_url"]
+                    for result in db.execute(
+                        "SELECT shop_key, product_url FROM item_shop_links WHERE item_id=?", (item["id"],)
+                    )
+                }
         return item
+
+    def _replace_shop_links(self, db: sqlite3.Connection, item_id: int, links: dict[str, Any]) -> None:
+        valid_shops = {source.key for source in SOURCES if source.kind == "shop"}
+        db.execute("DELETE FROM item_shop_links WHERE item_id=?", (item_id,))
+        now = utc_now()
+        for key, value in links.items():
+            url = str(value or "").strip()
+            if key in valid_shops and url:
+                db.execute(
+                    "INSERT INTO item_shop_links(item_id, shop_key, product_url, updated_at) VALUES(?, ?, ?, ?)",
+                    (item_id, key, url, now),
+                )
 
     def list_items(self, kind: str, scope: str = "active", query: str = "") -> list[dict[str, Any]]:
         if kind not in {"source", "stock"}:
@@ -210,6 +276,7 @@ class CatalogStore:
                     "VALUES('source', ?, ?, ?, 'manual', ?, ?, ?)",
                     (model, canonical, json.dumps(sheets), int(bool(payload.get("paused"))), now, now),
                 )
+                self._replace_shop_links(db, cursor.lastrowid, payload.get("shop_links") or {})
         elif kind == "stock":
             nomenclature = str(payload.get("nomenclature", "")).strip()
             if not nomenclature:
@@ -254,11 +321,9 @@ class CatalogStore:
                     fields[name] = number(payload[name])
         if "paused" in payload:
             fields["paused"] = int(bool(payload["paused"]))
-        if not fields:
+        has_shop_links = current["kind"] == "source" and "shop_links" in payload
+        if not fields and not has_shop_links:
             return current
-        fields["origin"] = "manual"
-        fields["updated_at"] = utc_now()
-        assignments = ", ".join(f"{name}=?" for name in fields)
         with self._lock, self.connect() as db:
             if current["kind"] == "source" and "canonical_model" in fields:
                 duplicate = db.execute(
@@ -268,7 +333,13 @@ class CatalogStore:
                 ).fetchone()
                 if duplicate:
                     raise ValueError(f"Model already exists (item {duplicate['id']})")
-            db.execute(f"UPDATE catalog_items SET {assignments} WHERE id=?", (*fields.values(), item_id))
+            if fields:
+                fields["origin"] = "manual"
+                fields["updated_at"] = utc_now()
+                assignments = ", ".join(f"{name}=?" for name in fields)
+                db.execute(f"UPDATE catalog_items SET {assignments} WHERE id=?", (*fields.values(), item_id))
+            if has_shop_links:
+                self._replace_shop_links(db, item_id, payload.get("shop_links") or {})
         return self.get_item(item_id)
 
     def trash_item(self, item_id: int) -> dict[str, Any]:
@@ -414,6 +485,106 @@ class CatalogStore:
             result[row["kind"]] = {key: int(row[key] or 0) for key in ("active_or_paused", "active", "paused", "trash")}
         result["stock"]["unmatched"] = sum(1 for model in stock_models if not model or model not in active_models)
         return result
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        masters = self.get_meta("source_masters", {"marketplace": True, "shop": True})
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM monitoring_sources ORDER BY sort_order").fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["enabled"] = bool(item["enabled"])
+            item["master_enabled"] = bool(masters.get(item["kind"], True))
+            item["effective_enabled"] = item["enabled"] and item["master_enabled"]
+            result.append(item)
+        return result
+
+    def update_source(self, key: str, enabled: bool) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            cursor = db.execute("UPDATE monitoring_sources SET enabled=? WHERE key=?", (int(enabled), key))
+            if not cursor.rowcount:
+                raise KeyError(key)
+        return next(item for item in self.list_sources() if item["key"] == key)
+
+    def update_source_master(self, kind: str, enabled: bool) -> dict[str, Any]:
+        if kind not in {"marketplace", "shop"}:
+            raise ValueError("kind must be marketplace or shop")
+        masters = self.get_meta("source_masters", {"marketplace": True, "shop": True})
+        masters[kind] = bool(enabled)
+        with self._lock, self.connect() as db:
+            self._set_meta(db, "source_masters", masters)
+        return {"kind": kind, "enabled": bool(enabled)}
+
+    def register_monitoring_session(self, run_id: str, legacy_started: bool, marketplace_keys: list[str]) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO monitoring_sessions(run_id, legacy_started, marketplace_keys, created_at) "
+                "VALUES(?, ?, ?, ?)",
+                (run_id, int(legacy_started), json.dumps(marketplace_keys), utc_now()),
+            )
+
+    def monitoring_session(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM monitoring_sessions WHERE run_id=?", (run_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["legacy_started"] = bool(result["legacy_started"])
+        result["marketplace_keys"] = json.loads(result["marketplace_keys"] or "[]")
+        return result
+
+    def latest_monitoring_session(self) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT run_id FROM monitoring_sessions ORDER BY created_at DESC LIMIT 1").fetchone()
+        return self.monitoring_session(row["run_id"]) if row else None
+
+    def start_shop_run(
+        self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]
+    ) -> None:
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM shop_observations WHERE run_id=?", (run_id,))
+            for model in models:
+                for shop in shops:
+                    db.execute(
+                        "INSERT INTO shop_observations(run_id, item_id, shop_key, status) VALUES(?, ?, ?, 'PENDING')",
+                        (run_id, model["id"], shop["key"]),
+                    )
+
+    def finish_shop_observation(
+        self,
+        run_id: str,
+        item_id: int,
+        shop_key: str,
+        status: str,
+        *,
+        title: str | None = None,
+        price_eur: float | None = None,
+        availability: str | None = None,
+        product_url: str | None = None,
+        search_url: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "UPDATE shop_observations SET status=?, title=?, price_eur=?, availability=?, product_url=?, "
+                "search_url=?, error=?, checked_at=? WHERE run_id=? AND item_id=? AND shop_key=?",
+                (
+                    status, title, price_eur, availability, product_url, search_url, error, utc_now(),
+                    run_id, item_id, shop_key,
+                ),
+            )
+
+    def shop_run(self, run_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT o.*, i.model, s.name shop_name, s.country FROM shop_observations o "
+                "JOIN catalog_items i ON i.id=o.item_id JOIN monitoring_sources s ON s.key=o.shop_key "
+                "WHERE o.run_id=? ORDER BY i.model, s.sort_order",
+                (run_id,),
+            ).fetchall()
+        results = [dict(row) for row in rows]
+        pending = sum(1 for row in results if row["status"] == "PENDING")
+        return {"status": "RUNNING" if pending else "COMPLETE", "pending": pending, "results": results}
 
     def prepare_legacy(self, original_database: Path, legacy_database: Path, workbook_path: Path) -> None:
         legacy_database.parent.mkdir(parents=True, exist_ok=True)
