@@ -1,4 +1,8 @@
-from price_monitor_v4.shops import find_product_url, incomplete_catalog_render, parse_product, security_challenge
+import asyncio
+
+import httpx
+
+from price_monitor_v4.shops import ActionRequiredError, ShopMonitor, find_product_url, incomplete_catalog_render, parse_product, security_challenge
 
 
 def test_product_json_ld_and_search_link_parsing() -> None:
@@ -19,3 +23,34 @@ def test_product_json_ld_and_search_link_parsing() -> None:
     assert find_product_url(unrelated, "https://shop.example/search?q=55P7L", "55P7L") is None
     assert security_challenge("<title>Just a moment...</title><p>Performing security verification</p>")
     assert incomplete_catalog_render('<span class="MuiSkeleton-root"></span>')
+    assert issubclass(ActionRequiredError, ValueError)
+
+
+def test_security_challenge_is_reported_as_action_required() -> None:
+    class Store:
+        observation = None
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> str:
+            return "<title>Just a moment...</title><p>Performing security verification</p>"
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(lambda request: httpx.Response(403, request=request))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client,
+                Renderer(),
+                "run-1",
+                {"id": 7, "model": "55T7B", "shop_links": {}},
+                {"key": "varle"},
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "ACTION_REQUIRED"
+    assert "normal browser" in kwargs["error"]

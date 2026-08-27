@@ -26,6 +26,8 @@ Marketplaces and shops have individual switches plus master switches for each gr
 
 The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Every column can be hidden from its header and restored from the **Columns** menu; column visibility is retained in the browser.
 
+If a retailer presents a browser security challenge, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to continue in the normal browser session.
+
 ## Configuration
 
 The default configuration is documented in `.env.example`. Runtime data is stored beside the executable:

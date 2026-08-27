@@ -219,6 +219,7 @@ function aggregateResults() {
 function rowStatus(row) {
   const statuses = [...row.tasks.map(item => item.status), ...Object.values(row.shops).map(item => item.status)];
   if (statuses.some(value => ['RUNNING', 'PENDING'].includes(value))) return 'RUNNING';
+  if (statuses.some(value => value === 'ACTION_REQUIRED')) return 'ACTION_REQUIRED';
   if (statuses.some(value => value === 'SUCCESS')) return 'SUCCESS';
   if (statuses.some(value => value === 'FAILED')) return 'FAILED';
   if (statuses.some(value => value === 'INCOMPLETE')) return 'INCOMPLETE';
@@ -230,6 +231,7 @@ function resultCounts(row) {
   return {
     success: statuses.filter(value => value === 'SUCCESS').length,
     failed: statuses.filter(value => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(value)).length,
+    actionRequired: statuses.filter(value => value === 'ACTION_REQUIRED').length,
     pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
   };
 }
@@ -238,6 +240,7 @@ function statusCell(row) {
   const counts = resultCounts(row); const parts = [];
   parts.push(badge(`Success ${counts.success}`, 'success'));
   parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found'));
+  if (counts.actionRequired) parts.push(badge(`Action required ${counts.actionRequired}`, 'action-required'));
   if (counts.pending) parts.push(badge(`Pending ${counts.pending}`, 'incomplete'));
   return `<span class="status-counts">${parts.join(' ')}</span>`;
 }
@@ -258,7 +261,8 @@ function shopCell(row, shop) {
   if (!shop.effective_enabled && !item) return '<span class="muted">Disabled</span>';
   if (!item) return '—';
   const link = item.product_url || item.search_url; const summary = item.status === 'SUCCESS' ? euro(item.price_eur) : item.status === 'PENDING' ? 'Checking…' : item.status.replaceAll('_', ' ');
-  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">Open ${escapeHtml(item.product_url ? 'product' : 'search')}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
+  const linkLabel = item.status === 'ACTION_REQUIRED' ? 'Open verification' : `Open ${item.product_url ? 'product' : 'search'}`;
+  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
 }
 
 function columns() {
@@ -320,9 +324,11 @@ function renderRun(run) {
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
   const all = [...state.tasks, ...state.shopResults]; const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
   const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'NOT_FOUND', 'INCOMPLETE'].includes(item.status)).length;
+  const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
-  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Failed ${failed}` : `Completed · Success ${success} · Failed ${failed}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults();
+  const actionText = actionRequired ? ` · Action required ${actionRequired}` : '';
+  byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Failed ${failed}${actionText}` : `Completed · Success ${success} · Failed ${failed}${actionText}`; byId('start-run').disabled = run.status === 'RUNNING'; renderResults();
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); }
 }
 

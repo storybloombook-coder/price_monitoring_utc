@@ -113,7 +113,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .monitor-arrow:active { transform: translateY(2px) scale(.95); box-shadow: inset 0 2px 3px rgba(0,0,0,.22); }
 .badge { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 800; white-space: nowrap; background: var(--surface-2); border: 1px solid var(--line); }
 .badge.active, .badge.success { color: var(--brand); }
-.badge.paused, .badge.incomplete { color: var(--warn); }
+.badge.paused, .badge.incomplete, .badge.action-required { color: var(--warn); }
 .badge.trash, .badge.failed { color: var(--danger); }
 .badge.unmatched, .badge.not-found { color: var(--muted); }
 .status-counts { display: inline-flex; flex-wrap: wrap; gap: 4px; }

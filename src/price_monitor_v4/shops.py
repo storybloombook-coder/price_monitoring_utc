@@ -22,6 +22,10 @@ from .sources import SOURCE_BY_KEY
 MONEY_RE = re.compile(r"(?<!\d)(\d{1,5}(?:[\s.,]\d{3})*(?:[.,]\d{2})?)\s*(?:€|EUR)\b", re.IGNORECASE)
 
 
+class ActionRequiredError(ValueError):
+    """The shop requires a visible, human-controlled browser session."""
+
+
 class ProductDocument(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -350,11 +354,15 @@ class ShopMonitor:
                         raise
                     async with self._browser_semaphore:
                         if shop["key"] in self._browser_blocked:
-                            raise
+                            raise ActionRequiredError(
+                                "Open the shop link in your normal browser, complete its security verification, then retry monitoring"
+                            )
                         rendered = await renderer.fetch(url)
                         if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
                             self._browser_blocked.add(shop["key"])
-                            raise ValueError("Site security verification blocked automated access")
+                            raise ActionRequiredError(
+                                "Open the shop link in your normal browser, complete its security verification, then retry monitoring"
+                            )
                     return rendered, url
 
             html, resolved_url = await fetch(target_url)
@@ -376,6 +384,11 @@ class ShopMonitor:
                     run_id, model["id"], shop["key"], "NOT_FOUND", product_url=product_url or None,
                     search_url=search_url, error="No matching product price was found"
                 )
+        except ActionRequiredError as error:
+            self.store.finish_shop_observation(
+                run_id, model["id"], shop["key"], "ACTION_REQUIRED", product_url=manual_url,
+                search_url=search_url, error=str(error)[:500]
+            )
         except (httpx.HTTPError, ValueError, OSError) as error:
             self.store.finish_shop_observation(
                 run_id, model["id"], shop["key"], "FAILED", product_url=manual_url,
