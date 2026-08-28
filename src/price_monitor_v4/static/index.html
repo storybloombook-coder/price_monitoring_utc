@@ -88,7 +88,10 @@
     <div id="source-fields" class="form-grid">
       <label class="wide">Model<input id="source-model" autocomplete="off" placeholder="For example, 55P7L"></label>
       <fieldset class="wide sheet-options"><legend>Product categories</legend><p class="field-help">Select where this model belongs: televisions, soundbars or monitors. These categories match the Excel workbook sheets.</p><label><input type="checkbox" name="source-sheet" value="TV"> TV</label><label><input type="checkbox" name="source-sheet" value="SB"> Soundbars</label><label><input type="checkbox" name="source-sheet" value="Monitors"> Monitors</label></fieldset>
-      <fieldset class="wide shop-link-fields"><legend>Direct shop links <span class="muted">(optional overrides)</span></legend><div id="shop-link-inputs" class="shop-link-grid"></div></fieldset>
+      <details id="direct-shop-links" class="wide shop-link-fields link-fields-details">
+        <summary class="link-fields-summary"><span>Direct shop links <span class="muted">(optional overrides)</span></span><span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary>
+        <div id="shop-link-inputs" class="shop-link-grid"></div>
+      </details>
       <fieldset class="wide shop-link-fields"><legend>Assisted marketplace links <span class="muted">(optional product-page overrides)</span></legend><div id="marketplace-link-inputs" class="shop-link-grid"></div></fieldset>
     </div>
     <div id="stock-fields" class="form-grid" hidden>

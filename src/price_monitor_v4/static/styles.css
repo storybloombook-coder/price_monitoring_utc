@@ -188,6 +188,15 @@ dialog form { padding: 20px; }
 .sheet-options label { display: inline-flex; margin-right: 16px; font-weight: 500; }
 .field-help { margin: 0 0 9px; color: var(--muted); font-size: 12px; }
 .shop-link-fields { border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
+.link-fields-details { padding: 0; overflow: hidden; }
+.link-fields-summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; font-weight: 650; user-select: none; }
+.link-fields-summary::-webkit-details-marker { display: none; }
+.link-fields-summary .collapse-button { width: 28px; height: 28px; min-width: 28px; min-height: 28px; flex-basis: 28px; }
+.link-fields-summary .collapse-button svg { width: 16px; height: 16px; }
+.link-fields-details:not([open]) .collapse-button svg { transform: rotate(180deg); }
+.link-fields-summary:hover .collapse-button { background: var(--brand-hover); }
+.link-fields-summary:active .collapse-button { transform: translateY(2px) scale(.96); box-shadow: 0 1px 0 color-mix(in srgb, var(--brand) 60%, #000), inset 0 2px 4px rgba(0,0,0,.2); }
+.link-fields-details > .shop-link-grid { margin: 0; padding: 2px 12px 12px; border-top: 1px solid var(--line); }
 .shop-link-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; margin-top: 8px; }
 .shop-link-grid label { min-width: 0; }
 .pause-toggle { display: flex; gap: 7px; align-items: center; margin: 16px 0; }
