@@ -5,6 +5,24 @@ const SHOP_METHODS = [
   ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual only']
 ];
 const MARKETPLACE_METHODS = [['auto', 'Auto'], ['legacy', 'Legacy engine']];
+const STATUS_HELP = {
+  active: 'Enabled and available for the normal workflow.',
+  paused: 'Temporarily excluded from monitoring without deleting the position.',
+  trash: 'Moved to trash. It is excluded until restored or permanently deleted.',
+  monitoring: 'This stock model is linked to an active model in the monitoring list.',
+  unmatched: 'This stock position is not linked to an active monitoring model.',
+  success: 'The check completed and returned a usable result.',
+  failed: 'The check ended with an error and returned no reliable result.',
+  'not-found': 'The source was checked, but no matching model or offer was found.',
+  incomplete: 'The check was stopped or could not finish with a reliable result.',
+  'action-required': 'A person must verify the page, retry capture, or confirm the result manually.',
+  cooldown: 'Requests to this source are paused temporarily to avoid a longer block.',
+  cached: 'A recent saved result was reused; no new retailer request was sent.',
+  running: 'The check is currently running.',
+  pending: 'The check is queued and has not finished yet.',
+  'not-started': 'This check has not started.',
+  disabled: 'This source is switched off and is not included in monitoring.'
+};
 const state = {
   source: [], sourceOptions: [], stock: [], summary: null, sources: [], tasks: [], shopResults: [], runPoll: null,
   catalogStates: { source: new Set(['active', 'paused']), stock: new Set(['active', 'paused']) },
@@ -37,7 +55,10 @@ function showBanner(kind, message) {
   window.setTimeout(() => { target.hidden = true; }, 5000);
 }
 
-function badge(label, type) { return `<span class="badge ${escapeHtml(type)}">${escapeHtml(label)}</span>`; }
+function badge(label, type, help = STATUS_HELP[type]) {
+  const tooltip = help ? ` title="${escapeHtml(help)}" tabindex="0"` : '';
+  return `<span class="badge ${escapeHtml(type)}"${tooltip}>${escapeHtml(label)}</span>`;
+}
 function statusClass(value) { return String(value || '').toLowerCase().replaceAll('_', '-'); }
 
 function itemStatus(item) {
@@ -310,7 +331,7 @@ function resultCounts(row) {
 function statusCell(row) {
   const counts = resultCounts(row); const parts = [];
   parts.push(badge(`Success ${counts.success}`, 'success'));
-  parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found'));
+  parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found', STATUS_HELP.failed));
   parts.push(badge(`Not found ${counts.notFound}`, 'not-found'));
   if (counts.actionRequired) parts.push(badge(`Action required ${counts.actionRequired}`, 'action-required'));
   if (counts.cooldown) parts.push(badge(`Cooldown ${counts.cooldown}`, 'cooldown'));
@@ -328,24 +349,26 @@ function lowestOffer(row, field) {
   return offers.sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
 }
 
-function marketplaceCell(row) {
+function marketplaceCell(row, openDetails) {
   if (!row.tasks.length) return '—';
+  const detailKey = `${row.key}:marketplaces`;
   const marketplaceLowest = field => row.tasks.map(task => task[field]).filter(Boolean).sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
   const cheapest = marketplaceLowest('cheapest_in_stock') || marketplaceLowest('cheapest_pre_order');
   const details = row.tasks.map(task => `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock)}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order)}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
-  return `<details class="cell-details"><summary>${cheapest ? offerLink(cheapest) : `${row.tasks.length} result${row.tasks.length === 1 ? '' : 's'}`}</summary>${details}</details>`;
+  return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${cheapest ? offerLink(cheapest) : `${row.tasks.length} result${row.tasks.length === 1 ? '' : 's'}`}</summary>${details}</details>`;
 }
 
-function shopCell(row, shop) {
+function shopCell(row, shop, openDetails) {
   const item = row.shops[shop.key];
-  if (!shop.effective_enabled && !item) return '<span class="muted">Disabled</span>';
+  if (!shop.effective_enabled && !item) return `<span class="muted" title="${escapeHtml(STATUS_HELP.disabled)}">Disabled</span>`;
   if (!item) return '—';
+  const detailKey = `${row.key}:shop:${shop.key}`;
   const link = item.product_url || item.search_url;
   const retryLabel = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : null;
   const summary = item.status === 'SUCCESS' ? `${euro(item.price_eur)}${item.cached ? ' · cached' : ''}` : item.status === 'PENDING' ? 'Checking…' : item.status === 'COOLDOWN' ? 'Cooldown' : item.status.replaceAll('_', ' ');
   const linkLabel = item.status === 'ACTION_REQUIRED' ? 'Open verification' : `Open ${item.product_url ? 'product' : 'search'}`;
   const attempts = (item.attempts || []).map(attempt => `${attempt.method}: ${attempt.result.toLowerCase()} (${attempt.duration_ms} ms)`).join(' · ');
-  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.collection_method ? `<span><b>Method:</b> ${escapeHtml(item.collection_method)}</span>` : ''}${attempts ? `<span class="muted">${escapeHtml(attempts)}</span>` : ''}${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
+  return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.collection_method ? `<span><b>Method:</b> ${escapeHtml(item.collection_method)}</span>` : ''}${attempts ? `<span class="muted">${escapeHtml(attempts)}</span>` : ''}${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
 }
 
 function columns() {
@@ -392,6 +415,10 @@ function resultRowVisible(row) {
 }
 
 function renderResults() {
+  const openDetails = new Set(
+    [...document.querySelectorAll('#result-rows details[data-detail-key][open]')]
+      .map(detail => detail.dataset.detailKey)
+  );
   const rows = aggregateResults(); buildResultFilters(rows); const cols = columns();
   byId('result-head').innerHTML = cols.map(col => `<th data-col="${escapeHtml(col.key)}" class="${state.hiddenColumns.has(col.key) ? 'col-hidden' : ''}">${escapeHtml(col.label)}</th>`).join('');
   renderMultiFilter('column-filter', cols.map(col => ({ value: col.key, label: col.label })), new Set(cols.filter(col => !state.hiddenColumns.has(col.key)).map(col => col.key)), () => {});
@@ -400,8 +427,8 @@ function renderResults() {
   byId('result-rows').innerHTML = rows.length ? rows.map(row => {
     const stockOffer = lowestOffer(row, 'cheapest_in_stock'); const preorderOffer = lowestOffer(row, 'cheapest_pre_order');
     const best = stockOffer || preorderOffer; const margin = best && row.stockCost != null ? Number(best.price_eur) - Number(row.stockCost) : null;
-    const shopCells = state.sources.filter(item => item.kind === 'shop').map(shop => cell(`shop-${shop.key}`, shopCell(row, shop), 'shop-cell')).join('');
-    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${cell('marketplaces', marketplaceCell(row), 'source-cell')}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
+    const shopCells = state.sources.filter(item => item.kind === 'shop').map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
+    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell')}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
@@ -413,7 +440,7 @@ function renderActionRequired(run) {
   review.textContent = items.length ? `Review required checks (${items.length})` : 'Review required checks';
   byId('action-items').innerHTML = items.length ? items.map(item => {
     const link = item.product_url || item.search_url;
-    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.shop_name || item.shop_key)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-retry-action data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Retry check</button></div></div>`;
+    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.shop_name || item.shop_key)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Capture again</button><button type="button" class="secondary" data-check-action="not-found" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Mark not found</button><button type="button" class="secondary" data-check-action="manual-price" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Save manual price</button></div></div>`;
   }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
 
   if (!items.length) {
@@ -429,21 +456,44 @@ function renderActionRequired(run) {
 }
 
 async function handleActionDialog(event) {
-  const button = event.target.closest('[data-retry-action]');
+  const button = event.target.closest('[data-check-action]');
   if (!button || !state.currentRunId) return;
+  const action = button.dataset.checkAction;
+  let payload = null;
+  if (action === 'not-found') {
+    if (!window.confirm('Confirm that this model is not available from this shop?')) return;
+    payload = { status: 'NOT_FOUND' };
+  }
+  if (action === 'manual-price') {
+    const entered = window.prompt('Enter the confirmed in-stock price in EUR:');
+    if (entered === null) return;
+    const price = Number(entered.trim().replace(',', '.'));
+    if (!Number.isFinite(price) || price < 0) {
+      showBanner('error', 'Enter a valid non-negative price.');
+      return;
+    }
+    payload = { status: 'SUCCESS', price_eur: price, availability: 'IN_STOCK' };
+  }
+  const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = 'Retrying…';
+  button.textContent = action === 'retry' ? 'Capturing…' : 'Saving…';
   try {
-    await api(`/runs/${encodeURIComponent(state.currentRunId)}/shops/${button.dataset.itemId}/${encodeURIComponent(button.dataset.shopKey)}/retry`, { method: 'POST' });
+    const base = `/runs/${encodeURIComponent(state.currentRunId)}/shops/${button.dataset.itemId}/${encodeURIComponent(button.dataset.shopKey)}`;
+    if (action === 'retry') {
+      await api(`${base}/retry`, { method: 'POST' });
+    } else {
+      await api(`${base}/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    }
     state.lastActionSignature = '';
-    byId('action-dialog').close();
-    showBanner('success', 'The selected check is running again.');
+    showBanner('success', action === 'retry' ? 'The selected check is capturing again.' : 'Manual result saved.');
     await pollRun(state.currentRunId);
-    if (state.runPoll) clearInterval(state.runPoll);
-    state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+    if (action === 'retry') {
+      if (state.runPoll) clearInterval(state.runPoll);
+      state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+    }
   } catch (error) {
     button.disabled = false;
-    button.textContent = 'Retry check';
+    button.textContent = originalLabel;
     showBanner('error', error.message);
   }
 }

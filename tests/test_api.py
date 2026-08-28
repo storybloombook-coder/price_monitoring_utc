@@ -98,3 +98,10 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert stopped.status_code == 200
         assert stopped.json()["status"] == "INCOMPLETE"
         assert stopped.json()["shop_results"][0]["status"] == "INCOMPLETE"
+        resolved = client.post(
+            f"/runs/manual-stop-test/shops/{source['id']}/bite/resolve",
+            json={"status": "NOT_FOUND"},
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["status"] == "NOT_FOUND"
+        assert resolved.json()["collection_method"] == "manual"

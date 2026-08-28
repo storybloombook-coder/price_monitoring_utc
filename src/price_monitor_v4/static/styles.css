@@ -123,6 +123,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .stock-row-monitored td:first-child { box-shadow: inset 3px 0 var(--brand); }
 .stock-row-monitored:hover { background: color-mix(in srgb, var(--brand) 11%, transparent); }
 .badge { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 800; white-space: nowrap; background: var(--surface-2); border: 1px solid var(--line); }
+.badge[title] { cursor: help; }
+.badge[title]:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .badge.active, .badge.success, .badge.monitoring { color: var(--brand); }
 .badge.paused, .badge.incomplete, .badge.action-required, .badge.cooldown { color: var(--warn); }
 .badge.cached { color: var(--blue); }

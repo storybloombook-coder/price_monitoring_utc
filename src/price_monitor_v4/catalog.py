@@ -775,6 +775,53 @@ class CatalogStore:
                 raise KeyError((run_id, item_id, shop_key))
             db.execute("DELETE FROM shop_protection_state WHERE shop_key=?", (shop_key,))
 
+    def resolve_shop_observation(
+        self,
+        run_id: str,
+        item_id: int,
+        shop_key: str,
+        status: str,
+        *,
+        price_eur: float | None = None,
+        availability: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"NOT_FOUND", "SUCCESS"}:
+            raise ValueError("Manual shop status must be NOT_FOUND or SUCCESS")
+        if status == "SUCCESS" and (price_eur is None or price_eur < 0):
+            raise ValueError("A non-negative price is required for manual success")
+        attempt = [{"method": "manual", "result": "CONFIRMED", "duration_ms": 0}]
+        with self._lock, self.connect() as db:
+            current = db.execute(
+                "SELECT product_url,search_url FROM shop_observations "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            ).fetchone()
+            if not current:
+                raise KeyError((run_id, item_id, shop_key))
+            db.execute(
+                "UPDATE shop_observations SET status=?, price_eur=?, availability=?, error=NULL, checked_at=?, "
+                "retry_after=NULL, cached=0, collection_method='manual', attempts_json=? "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
+                (
+                    status,
+                    price_eur if status == "SUCCESS" else None,
+                    (availability or "IN_STOCK") if status == "SUCCESS" else None,
+                    utc_now(),
+                    json.dumps(attempt),
+                    run_id,
+                    item_id,
+                    shop_key,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM shop_observations WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            ).fetchone()
+        result = dict(row)
+        result["cached"] = bool(result.get("cached"))
+        result["attempts"] = json.loads(result.pop("attempts_json", "[]") or "[]")
+        return result
+
     def shop_observation_pending(self, run_id: str, item_id: int, shop_key: str) -> bool:
         with self.connect() as db:
             row = db.execute(

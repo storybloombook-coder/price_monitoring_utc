@@ -151,6 +151,14 @@ def test_action_required_shop_observation_can_be_retried(tmp_path: Path) -> None
     assert result["results"][0]["status"] == "PENDING"
     assert result["results"][0]["error"] is None
 
+    store.finish_shop_observation(
+        "run-1", source["id"], "bite", "ACTION_REQUIRED", error="Verification required"
+    )
+    resolved = store.resolve_shop_observation("run-1", source["id"], "bite", "NOT_FOUND")
+    assert resolved["status"] == "NOT_FOUND"
+    assert resolved["collection_method"] == "manual"
+    assert resolved["attempts"][0]["result"] == "CONFIRMED"
+
 
 def test_hard_stop_finalizes_shop_and_legacy_work(tmp_path: Path) -> None:
     store = CatalogStore(tmp_path / "catalog.sqlite3")

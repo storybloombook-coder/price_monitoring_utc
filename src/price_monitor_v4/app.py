@@ -491,6 +491,29 @@ def create_app(
         export_path.unlink(missing_ok=True)
         return {"run_id": run_id, "item_id": item_id, "shop_key": shop_key, "status": "PENDING"}
 
+    @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/resolve")
+    async def resolve_shop_check(
+        run_id: str, item_id: int, shop_key: str, payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        try:
+            status = str(payload.get("status") or "").upper()
+            price = payload.get("price_eur")
+            result = catalog.resolve_shop_observation(
+                run_id,
+                item_id,
+                shop_key,
+                status,
+                price_eur=float(price) if price not in (None, "") else None,
+                availability=str(payload.get("availability") or "IN_STOCK"),
+            )
+        except KeyError as error:
+            raise HTTPException(404, "Shop observation not found") from error
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return result
+
     @app.get("/history")
     async def history(limit: int = 100) -> Response:
         return await proxy("GET", f"/history?limit={limit}")

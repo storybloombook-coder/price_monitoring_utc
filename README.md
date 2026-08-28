@@ -49,6 +49,10 @@ The monitoring table keeps one row per model. Marketplace and shop cells expand 
 
 If the Edge extension is connected, protected pages are automatically delegated to a visible normal-browser tab. Without the extension, or when a human verification times out, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually.
 
+Opening a retailer page does not silently change stored monitoring data. The **Action required** dialog provides explicit follow-up actions: **Capture again** after completing browser verification, **Mark not found** after confirming that the model is absent, or **Save manual price** for a confirmed in-stock offer. Manual results immediately update the table and invalidate the previous export so it can be regenerated.
+
+Status badges include hover/focus explanations throughout the catalog, stock table, and monitoring results. Expanded marketplace and shop result cells remain open while the running monitor refreshes the table.
+
 ### Polite monitoring
 
 Direct-shop collection uses one sequential request stream per retailer with an 8–15 second delay. Fresh successful observations are reused for four hours and clearly marked **Cached**. A `429`, Cloudflare challenge, or blocked browser verification pauses the retailer for at least one hour (or the server's `Retry-After` value); remaining checks are marked **Cooldown** with the next retry time. Other retailer domains can continue independently. Marketplace concurrency defaults to one.
