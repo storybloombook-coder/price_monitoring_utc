@@ -110,6 +110,27 @@ def test_source_toggles_and_manual_shop_links_are_persisted(tmp_path: Path) -> N
     assert senukai["last_success_method"] == "playwright"
 
 
+def test_discovered_links_and_monitoring_history_are_persisted(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    item = store.create_item(
+        "source", {"model": "65P7K", "shop_links": {"varle": "https://www.varle.lt/old"}}
+    )
+    store.remember_source_link(item["id"], "rde", "https://www.rde.ee/product/65p7k")
+    store.remember_source_link(item["id"], "varle", "https://www.varle.lt/new")
+    store.remember_source_link(item["id"], "salidzini", "https://www.salidzini.lv/cena?q=65P7K")
+
+    links = store.get_item(item["id"])
+    assert links["shop_links"] == {
+        "varle": "https://www.varle.lt/new", "rde": "https://www.rde.ee/product/65p7k"
+    }
+    assert links["marketplace_links"]["salidzini"].endswith("q=65P7K")
+
+    store.register_monitoring_session("run-history", False, ["salidzini"])
+    history = store.list_monitoring_sessions()
+    assert history[0]["run_id"] == "run-history"
+    assert history[0]["status"] == "COMPLETE"
+
+
 def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_path: Path) -> None:
     store = CatalogStore(tmp_path / "catalog.sqlite3")
     stock = store.create_item("stock", {"nomenclature": "TCL TV", "model": "55T7B"})
@@ -184,6 +205,24 @@ def test_hard_stop_finalizes_shop_and_legacy_work(tmp_path: Path) -> None:
     with sqlite3.connect(legacy_database) as db:
         assert db.execute("SELECT status FROM monitoring_runs").fetchone()[0] == "INCOMPLETE"
         assert db.execute("SELECT status FROM marketplace_tasks").fetchone()[0] == "INCOMPLETE"
+
+
+def test_clear_monitoring_session_removes_current_results_and_stays_latest(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "25G64"})
+    shop = next(item for item in store.list_sources() if item["key"] == "bite")
+    salidzini = next(item for item in store.list_sources() if item["key"] == "salidzini")
+    store.register_monitoring_session("run-clear", False, ["salidzini"])
+    store.start_shop_run("run-clear", [source], [shop])
+    store.start_assisted_marketplace_run("run-clear", [source], [salidzini])
+
+    store.clear_monitoring_session("run-clear")
+
+    session = store.monitoring_session("run-clear")
+    assert session is not None and session["cleared_at"] is not None
+    assert store.latest_monitoring_session()["run_id"] == "run-clear"
+    assert store.shop_run("run-clear")["results"] == []
+    assert store.assisted_marketplace_run("run-clear")["results"] == []
 
 
 def test_shop_cache_and_protection_cooldown_persist_between_runs(tmp_path: Path) -> None:

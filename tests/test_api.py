@@ -24,7 +24,7 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "4.0.0"
+        assert health.json()["version"] == "4.2.0"
         assert health.json()["browser_bridge"]["connected"] is False
         assert health.json()["polite_monitoring"]["per_shop_concurrency"] == 1
         assert client.post("/browser-bridge/heartbeat").status_code == 403
@@ -105,3 +105,17 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert resolved.status_code == 200
         assert resolved.json()["status"] == "NOT_FOUND"
         assert resolved.json()["collection_method"] == "manual"
+
+        cleared = client.post("/runs/manual-stop-test/clear")
+        assert cleared.status_code == 200
+        assert cleared.json()["cleared"] is True
+        assert cleared.json()["tasks"] == []
+        assert cleared.json()["shop_results"] == []
+        assert client.get("/runs/latest").json()["cleared"] is True
+        history = client.get("/monitoring-history").json()
+        assert history[0]["run_id"] == "manual-stop-test"
+        invalid_link = client.post(
+            f"/runs/manual-stop-test/shops/{source['id']}/bite/link",
+            json={"url": "https://example.com/not-bite"},
+        )
+        assert invalid_link.status_code == 400

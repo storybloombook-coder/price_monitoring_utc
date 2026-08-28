@@ -31,7 +31,13 @@ from .catalog import CatalogStore, canonicalize
 from .sources import SOURCE_BY_KEY
 
 
-MONEY_RE = re.compile(r"(?<!\d)(\d{1,5}(?:[\s.,]\d{3})*(?:[.,]\d{2})?)\s*(?:€|EUR)\b", re.IGNORECASE)
+MONEY_RE = re.compile(
+    r"(?<!\d)(\d{1,5}(?:[\s.,]\d{3})*(?:[.,]\d{2})?)\s*(?:€|EUR)(?!\w)", re.IGNORECASE
+)
+CANDIDATE_RE = re.compile(
+    r'<script[^>]+id=["\']price-monitor-candidates["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class ActionRequiredError(ValueError):
@@ -195,6 +201,26 @@ def parse_product(html: str, url: str, model: str) -> dict[str, Any] | None:
         match = MONEY_RE.search(document.text)
         meta_price = normalize_price(match.group(1)) if match else None
     if meta_price is None:
+        candidate_match = CANDIDATE_RE.search(html or "")
+        try:
+            rendered_candidates = json.loads(candidate_match.group(1)) if candidate_match else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            rendered_candidates = []
+        for candidate in rendered_candidates if isinstance(rendered_candidates, list) else []:
+            text = str(candidate.get("text") or "") if isinstance(candidate, dict) else ""
+            if expected not in canonicalize(text).replace(" ", ""):
+                continue
+            # Elisa exposes the monthly payment before the actual product total.
+            total_match = re.search(
+                r"(?:toote\s+hind|total\s+price)\s*[:\-]?\s*" + MONEY_RE.pattern,
+                text, re.IGNORECASE,
+            )
+            price_match = total_match or MONEY_RE.search(text)
+            if price_match:
+                meta_price = normalize_price(price_match.group(price_match.lastindex or 1))
+                if meta_price is not None:
+                    break
+    if meta_price is None:
         return None
     return {
         "title": document.meta.get("og:title") or document.meta.get("twitter:title") or model,
@@ -226,6 +252,29 @@ def find_product_url(html: str, base_url: str, model: str) -> str | None:
             if any(token in path.lower() for token in ("/p/", "/product", "/televizoriai/")):
                 score += 1
             scored.append((score, url))
+    candidate_match = CANDIDATE_RE.search(html or "")
+    try:
+        rendered_candidates = json.loads(candidate_match.group(1)) if candidate_match else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        rendered_candidates = []
+    for candidate in rendered_candidates if isinstance(rendered_candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_text = str(candidate.get("text") or "")
+        if expected not in canonicalize(candidate_text).replace(" ", ""):
+            continue
+        for link in candidate.get("links") or []:
+            if not isinstance(link, dict) or not link.get("url"):
+                continue
+            url = urljoin(base_url, str(link["url"]))
+            parsed = urlparse(url)
+            if parsed.netloc != host or parsed.fragment:
+                continue
+            link_text = canonicalize(str(link.get("text") or "")).replace(" ", "")
+            path = unquote(parsed.path)
+            haystack = canonicalize(f"{link_text} {path}").replace(" ", "")
+            if expected in haystack:
+                scored.append((6 if expected in link_text else 5, url))
     return max(scored, default=(0, None))[1]
 
 
@@ -580,13 +629,17 @@ class ShopMonitor:
             }
 
             async def fetch(url: str) -> tuple[str, str]:
-                if selected_method == "manual":
+                # Manual discovery does not generate blind searches. Once the user has
+                # supplied a verified SKU URL, that URL becomes a safe automatic fast path.
+                # If it has moved, the same retry may perform the normal search fallback.
+                effective_method = "auto" if selected_method == "manual" and manual_url else selected_method
+                if effective_method == "manual":
                     raise ActionRequiredError("Manual collection is selected; open the retailer link and verify the price")
-                if selected_method != "auto":
-                    operation = methods.get(selected_method)
+                if effective_method != "auto":
+                    operation = methods.get(effective_method)
                     if not operation:
-                        raise CollectionMethodUnavailable(f"Unknown collection method: {selected_method}")
-                    return await attempted(selected_method, lambda: operation(url))
+                        raise CollectionMethodUnavailable(f"Unknown collection method: {effective_method}")
+                    return await attempted(effective_method, lambda: operation(url))
 
                 try:
                     return await attempted("direct", lambda: fetch_direct(url))
@@ -614,19 +667,28 @@ class ShopMonitor:
                         "Browser rendering did not complete and the Edge extension is not connected"
                     ) from last_error
 
-            html, resolved_url = await fetch(target_url)
-            product_url = target_url
+            parsed = None
+            product_url = ""
             if manual_url:
-                parsed = parse_product(html, resolved_url, model["model"])
-            else:
-                product_url = find_product_url(html, resolved_url, model["model"]) or ""
-                parsed = None
+                try:
+                    html, resolved_url = await fetch(manual_url)
+                    product_url = resolved_url
+                    parsed = parse_product(html, resolved_url, model["model"])
+                except (httpx.HTTPError, CollectionMethodUnavailable, RenderRequiredError):
+                    # A saved URL is a fast path, not a permanent dead end. Search again
+                    # when the retailer has moved or removed the old product page.
+                    parsed = None
+            if not parsed and search_url and search_url != manual_url:
+                search_html, search_resolved_url = await fetch(search_url)
+                product_url = find_product_url(search_html, search_resolved_url, model["model"]) or ""
                 if product_url:
                     product_html, product_resolved_url = await fetch(product_url)
                     parsed = parse_product(product_html, product_resolved_url, model["model"])
             if parsed:
                 if hasattr(self.store, "remember_source_method"):
                     self.store.remember_source_method(shop["key"], used_method or selected_method)
+                if parsed.get("product_url") and hasattr(self.store, "remember_source_link"):
+                    self.store.remember_source_link(model["id"], shop["key"], str(parsed["product_url"]))
                 self.store.finish_shop_observation(
                     run_id, model["id"], shop["key"], "SUCCESS", search_url=search_url,
                     collection_method=used_method or selected_method, attempts=attempts, **parsed
@@ -639,7 +701,7 @@ class ShopMonitor:
                 )
         except ActionRequiredError as error:
             cooldown_until = None
-            if selected_method != "manual":
+            if selected_method != "manual" or manual_url:
                 cooldown_until = self.store.pause_shop_for_protection(
                     run_id,
                     shop["key"],
@@ -658,7 +720,9 @@ class ShopMonitor:
                 collection_method=used_method or selected_method, attempts=attempts,
             )
 
-    def retry(self, run_id: str, item_id: int, shop_key: str) -> None:
+    def retry(
+        self, run_id: str, item_id: int, shop_key: str, *, method_override: str | None = None
+    ) -> None:
         model = self.store.get_item(item_id)
         shop = next(
             (item for item in self.store.list_sources() if item["key"] == shop_key and item["kind"] == "shop"),
@@ -669,6 +733,7 @@ class ShopMonitor:
         task_key = f"retry:{run_id}:{item_id}:{shop_key}"
         if task_key in self._tasks:
             raise ValueError("This shop check is already running")
+        self.store.ensure_shop_observation(run_id, item_id, shop_key)
         self.store.retry_shop_observation(run_id, item_id, shop_key)
         self._extension_blocked.discard(shop_key)
         self._browser_blocked.discard(shop_key)
@@ -686,13 +751,33 @@ class ShopMonitor:
                 async with httpx.AsyncClient(
                     timeout=self.timeout_seconds, follow_redirects=True, headers=headers
                 ) as client:
-                    await self._check_one(client, renderer, run_id, model, shop, playwright_renderer)
+                    await self._check_one(
+                        client, renderer, run_id, model, shop, playwright_renderer,
+                        method_override=method_override,
+                    )
             finally:
                 await renderer.close()
                 await playwright_renderer.close()
                 self._tasks.pop(task_key, None)
 
         self._tasks[task_key] = asyncio.create_task(run_retry())
+
+    def retry_model(self, run_id: str, item_id: int) -> int:
+        model = self.store.get_item(item_id)
+        if model["kind"] != "source" or model.get("deleted_at") or model.get("paused"):
+            raise KeyError(item_id)
+        shops = [
+            source for source in self.store.list_sources()
+            if source["kind"] == "shop" and source["effective_enabled"]
+        ]
+        started = 0
+        for shop in shops:
+            try:
+                self.retry(run_id, item_id, shop["key"])
+                started += 1
+            except ValueError:
+                continue
+        return started
 
     async def test_method(self, item_id: int, shop_key: str, method: str) -> dict[str, Any]:
         """Run one isolated SKU/method diagnostic without changing monitoring history."""

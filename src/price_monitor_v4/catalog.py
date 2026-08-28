@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
 
-from .sources import SOURCES
+from .sources import SOURCE_BY_KEY, SOURCES
 
 
 SOURCE_SHEETS = ("TV", "SB", "Monitors")
@@ -133,7 +133,8 @@ class CatalogStore:
                     legacy_started INTEGER NOT NULL,
                     marketplace_keys TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
-                    stopped_at TEXT
+                    stopped_at TEXT,
+                    cleared_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS shop_observations (
                     run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
@@ -187,6 +188,8 @@ class CatalogStore:
             }
             if "stopped_at" not in session_columns:
                 db.execute("ALTER TABLE monitoring_sessions ADD COLUMN stopped_at TEXT")
+            if "cleared_at" not in session_columns:
+                db.execute("ALTER TABLE monitoring_sessions ADD COLUMN cleared_at TEXT")
             observation_columns = {
                 row[1] for row in db.execute("PRAGMA table_info(shop_observations)")
             }
@@ -318,6 +321,33 @@ class CatalogStore:
                     "INSERT INTO item_marketplace_links(item_id, marketplace_key, product_url, updated_at) "
                     "VALUES(?, ?, ?, ?)",
                     (item_id, key, url, now),
+                )
+
+    def remember_source_link(self, item_id: int, source_key: str, product_url: str) -> None:
+        """Remember a verified product URL without replacing links for other sources."""
+        source = SOURCE_BY_KEY.get(source_key)
+        url = str(product_url or "").strip()
+        if not source or not url:
+            raise ValueError("A known source and product URL are required")
+        with self._lock, self.connect() as db:
+            item = db.execute(
+                "SELECT kind FROM catalog_items WHERE id=? AND deleted_at IS NULL", (item_id,)
+            ).fetchone()
+            if not item or item["kind"] != "source":
+                raise KeyError(item_id)
+            if source.kind == "shop":
+                db.execute(
+                    "INSERT INTO item_shop_links(item_id,shop_key,product_url,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(item_id,shop_key) DO UPDATE SET product_url=excluded.product_url,"
+                    "updated_at=excluded.updated_at",
+                    (item_id, source_key, url, utc_now()),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO item_marketplace_links(item_id,marketplace_key,product_url,updated_at) "
+                    "VALUES(?,?,?,?) ON CONFLICT(item_id,marketplace_key) DO UPDATE SET "
+                    "product_url=excluded.product_url,updated_at=excluded.updated_at",
+                    (item_id, source_key, url, utc_now()),
                 )
 
     def list_items(self, kind: str, scope: str = "active", query: str = "") -> list[dict[str, Any]]:
@@ -717,6 +747,20 @@ class CatalogStore:
             if not cursor.rowcount:
                 raise KeyError(run_id)
 
+    def clear_monitoring_session(self, run_id: str) -> None:
+        """Clear the current results while retaining a durable empty-table marker."""
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE monitoring_sessions SET stopped_at=COALESCE(stopped_at,?),cleared_at=? "
+                "WHERE run_id=?",
+                (now, now, run_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(run_id)
+            db.execute("DELETE FROM shop_observations WHERE run_id=?", (run_id,))
+            db.execute("DELETE FROM assisted_marketplace_observations WHERE run_id=?", (run_id,))
+
     def monitoring_session(self, run_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM monitoring_sessions WHERE run_id=?", (run_id,)).fetchone()
@@ -731,6 +775,35 @@ class CatalogStore:
         with self.connect() as db:
             row = db.execute("SELECT run_id FROM monitoring_sessions ORDER BY created_at DESC LIMIT 1").fetchone()
         return self.monitoring_session(row["run_id"]) if row else None
+
+    def list_monitoring_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT s.*,"
+                "(SELECT COUNT(*) FROM shop_observations o WHERE o.run_id=s.run_id) shop_checks,"
+                "(SELECT COUNT(*) FROM assisted_marketplace_observations o WHERE o.run_id=s.run_id) assisted_checks,"
+                "(SELECT COUNT(*) FROM shop_observations o WHERE o.run_id=s.run_id "
+                " AND o.status IN ('PENDING','RUNNING')) shop_pending,"
+                "(SELECT COUNT(*) FROM assisted_marketplace_observations o WHERE o.run_id=s.run_id "
+                " AND o.status IN ('PENDING','RUNNING')) assisted_pending "
+                "FROM monitoring_sessions s ORDER BY s.created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["legacy_started"] = bool(item["legacy_started"])
+            item["marketplace_keys"] = json.loads(item.get("marketplace_keys") or "[]")
+            if item.get("cleared_at"):
+                item["status"] = "CLEARED"
+            elif item.get("stopped_at"):
+                item["status"] = "INCOMPLETE"
+            elif item.get("shop_pending") or item.get("assisted_pending"):
+                item["status"] = "RUNNING"
+            else:
+                item["status"] = "COMPLETE"
+            sessions.append(item)
+        return sessions
 
     def start_shop_run(
         self,
@@ -826,6 +899,13 @@ class CatalogStore:
             if not cursor.rowcount:
                 raise KeyError((run_id, item_id, shop_key))
             db.execute("DELETE FROM shop_protection_state WHERE shop_key=?", (shop_key,))
+
+    def ensure_shop_observation(self, run_id: str, item_id: int, shop_key: str) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO shop_observations(run_id,item_id,shop_key,status) "
+                "VALUES(?,?,?,'PENDING')", (run_id, item_id, shop_key),
+            )
 
     def resolve_shop_observation(
         self,
@@ -1028,6 +1108,16 @@ class CatalogStore:
             if not cursor.rowcount:
                 raise KeyError((run_id, item_id, marketplace_key))
 
+    def ensure_assisted_marketplace_observation(
+        self, run_id: str, item_id: int, marketplace_key: str
+    ) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO assisted_marketplace_observations("
+                "run_id,item_id,marketplace_key,status) VALUES(?,?,?,'PENDING')",
+                (run_id, item_id, marketplace_key),
+            )
+
     def resolve_assisted_marketplace_observation(
         self,
         run_id: str,
@@ -1037,6 +1127,7 @@ class CatalogStore:
         *,
         price_eur: float | None = None,
         availability: str | None = None,
+        seller_name: str | None = None,
     ) -> dict[str, Any]:
         if status not in {"NOT_FOUND", "SUCCESS"}:
             raise ValueError("Manual marketplace status must be NOT_FOUND or SUCCESS")
@@ -1045,11 +1136,12 @@ class CatalogStore:
         attempts = [{"method": "manual", "result": "CONFIRMED", "duration_ms": 0}]
         with self._lock, self.connect() as db:
             cursor = db.execute(
-                "UPDATE assisted_marketplace_observations SET status=?,seller_name='Manual verification',"
+                "UPDATE assisted_marketplace_observations SET status=?,seller_name=?,"
                 "price_eur=?,availability=?,error=NULL,checked_at=?,cached=0,collection_method='manual',"
                 "attempts_json=? WHERE run_id=? AND item_id=? AND marketplace_key=?",
                 (
-                    status, price_eur if status == "SUCCESS" else None,
+                    status, (str(seller_name or "").strip() or "Manual verification") if status == "SUCCESS" else None,
+                    price_eur if status == "SUCCESS" else None,
                     (availability or "IN_STOCK") if status == "SUCCESS" else None,
                     utc_now(), json.dumps(attempts), run_id, item_id, marketplace_key,
                 ),

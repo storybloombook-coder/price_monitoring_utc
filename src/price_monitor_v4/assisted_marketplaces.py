@@ -191,6 +191,9 @@ class AssistedMarketplaceMonitor:
             })
             if offers:
                 best = offers[0]
+                remembered_url = str(best.get("product_url") or capture.get("url") or target_url)
+                if remembered_url:
+                    self.store.remember_source_link(model["id"], key, remembered_url)
                 self.store.finish_assisted_marketplace_observation(
                     run_id, model["id"], key, "SUCCESS", search_url=search_url,
                     collection_method="extension", attempts=attempts, **best,
@@ -225,6 +228,7 @@ class AssistedMarketplaceMonitor:
         task_key = f"retry:{run_id}:{item_id}:{marketplace_key}"
         if task_key in self._tasks:
             raise ValueError("This marketplace check is already running")
+        self.store.ensure_assisted_marketplace_observation(run_id, item_id, marketplace_key)
         self.store.retry_assisted_marketplace_observation(run_id, item_id, marketplace_key)
         self._blocked.discard(marketplace_key)
 
@@ -235,6 +239,24 @@ class AssistedMarketplaceMonitor:
                 self._tasks.pop(task_key, None)
 
         self._tasks[task_key] = asyncio.create_task(run_retry())
+
+    def retry_model(self, run_id: str, item_id: int) -> int:
+        model = self.store.get_item(item_id)
+        if model["kind"] != "source" or model.get("deleted_at") or model.get("paused"):
+            raise KeyError(item_id)
+        marketplaces = [
+            source for source in self.store.list_sources()
+            if source["kind"] == "marketplace" and source["effective_enabled"]
+            and source["key"] in self.supported_keys
+        ]
+        started = 0
+        for marketplace in marketplaces:
+            try:
+                self.retry(run_id, item_id, marketplace["key"])
+                started += 1
+            except ValueError:
+                continue
+        return started
 
     async def cancel_run(self, run_id: str) -> int:
         task_keys = [key for key in self._tasks if key == run_id or key.startswith(f"retry:{run_id}:")]

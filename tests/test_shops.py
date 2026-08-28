@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 
@@ -25,6 +26,25 @@ def test_product_json_ld_and_search_link_parsing() -> None:
     assert security_challenge("<title>Just a moment...</title><p>Performing security verification</p>")
     assert incomplete_catalog_render('<span class="MuiSkeleton-root"></span>')
     assert issubclass(ActionRequiredError, ValueError)
+
+
+def test_rendered_candidates_find_exact_product_and_elisa_total_price() -> None:
+    candidates = [{
+        "text": "TCL 25 FHD QD-Mini LED Gaming monitor (25G64)\nHind: 5.53 €/kuus\nToote hind 199€",
+        "links": [{
+            "text": "TCL Gaming monitor (25G64)",
+            "url": "https://www.elisa.ee/et/seadmed/eraklient/Monitorid/tcl/25g64",
+        }],
+    }]
+    html = (
+        '<script id="price-monitor-candidates" type="application/json">'
+        + json.dumps(candidates) + "</script>"
+    )
+    url = find_product_url(html, "https://www.elisa.ee/et/otsing?search=25G64", "25G64")
+    assert url == "https://www.elisa.ee/et/seadmed/eraklient/Monitorid/tcl/25g64"
+    parsed = parse_product(html, url, "25G64")
+    assert parsed is not None
+    assert parsed["price_eur"] == 199.0
 
 
 def test_security_challenge_is_reported_as_action_required() -> None:
@@ -212,6 +232,41 @@ def test_manual_only_sends_no_request_and_does_not_start_protection_cooldown() -
     assert args[3] == "ACTION_REQUIRED"
     assert kwargs["retry_after"] is None
     assert kwargs["attempts"] == []
+
+
+def test_manual_discovery_automatically_checks_a_saved_product_link() -> None:
+    class Store:
+        observation = None
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> None:
+            raise AssertionError("A simple saved product page should use the direct path")
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        product = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","name":"TCL S55HE","offers":{"price":"102.47",'
+            '"availability":"https://schema.org/InStock"}}</script>'
+        )
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, text=product, request=request))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, Renderer(), "saved-manual", {
+                    "id": 12, "model": "S55HE",
+                    "shop_links": {"rde": "https://www.rde.ee/product/s55he"},
+                }, {"key": "rde", "collection_method": "manual"},
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "SUCCESS"
+    assert kwargs["price_eur"] == 102.47
+    assert kwargs["collection_method"] == "direct"
 
 
 def test_shop_run_never_overlaps_requests_to_the_same_domain() -> None:

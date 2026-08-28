@@ -52,9 +52,11 @@ def test_assisted_marketplace_manual_result_and_link_are_persisted(tmp_path: Pat
     )
     store.resolve_assisted_marketplace_observation(
         "run-assisted", source["id"], "salidzini", "SUCCESS", price_eur=176.4,
+        seller_name="RD Electronics",
     )
     result = store.assisted_marketplace_run("run-assisted")["results"][0]
     assert result["status"] == "SUCCESS"
     assert result["cheapest_in_stock"]["price_eur"] == 176.4
     assert result["collection_method"] == "manual"
     assert result["assisted"] is True
+    assert result["cheapest_in_stock"]["store"] == "RD Electronics"

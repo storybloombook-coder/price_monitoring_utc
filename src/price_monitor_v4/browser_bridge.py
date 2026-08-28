@@ -40,7 +40,7 @@ class CaptureJob:
 class BrowserBridge:
     """In-memory queue connecting shop checks to the local Edge extension."""
 
-    def __init__(self, timeout_seconds: float = 150, connected_window_seconds: float = 180) -> None:
+    def __init__(self, timeout_seconds: float = 150, connected_window_seconds: float = 45) -> None:
         self.timeout_seconds = timeout_seconds
         self.connected_window_seconds = connected_window_seconds
         self._last_seen = 0.0

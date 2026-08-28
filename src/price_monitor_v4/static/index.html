@@ -11,7 +11,7 @@
     <header class="app-header">
       <div>
         <p class="eyebrow">UTC MARKET INTELLIGENCE</p>
-        <h1>Price Monitor <span class="version">v4.0.0</span></h1>
+        <h1>Price Monitor <span class="version">v4.2.0</span></h1>
         <p class="lead">Flexible product, stock and price monitoring in one workspace.</p>
       </div>
       <div id="service-state" class="service-state">Starting services…</div>
@@ -68,7 +68,7 @@
         <section><div class="source-group-heading"><div><h3>Marketplaces</h3><span class="muted">Comparison platforms</span></div><label class="switch-row">All marketplaces <input id="marketplace-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="marketplace-list" class="source-list"></div></section>
         <section><div class="source-group-heading"><div><h3>Shops</h3><span class="muted">Direct retailer monitoring</span></div><label class="switch-row">All shops <input id="shop-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="shop-list" class="country-list"></div></section>
       </div>
-      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span></div>
+      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span></div>
       <div id="progress" class="progress-block" hidden><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><p id="progress-text" class="muted"></p></div>
       <div class="result-toolbar">
         <details id="model-filter" class="multi-filter"><summary>Models</summary><div class="filter-menu"></div></details>
@@ -78,6 +78,7 @@
         <details id="column-filter" class="multi-filter columns-filter"><summary>Columns</summary><div class="filter-menu"></div></details>
       </div>
       <div class="table-wrap results-wrap"><table id="results-table"><thead><tr id="result-head"></tr></thead><tbody id="result-rows"><tr><td class="empty">Start monitoring to view results.</td></tr></tbody></table></div>
+      <section class="run-history"><div class="panel-heading"><div><p class="eyebrow">HISTORY</p><h3>Monitoring runs</h3></div><button id="refresh-history" type="button" class="compact secondary">Refresh</button></div><div id="monitoring-history" class="history-list muted">Loading previous runs…</div></section>
       <div class="footer-grid"><div><h3>Exports</h3><div id="exports" class="muted">Loading…</div></div><div><h3>Latest activity</h3><div id="logs" class="muted">Loading…</div></div></div>
     </section>
   </main>
@@ -86,7 +87,7 @@
     <div class="dialog-heading"><div><p class="eyebrow" id="dialog-kind">SOURCE</p><h2 id="dialog-title">New item</h2></div><button id="dialog-close" type="button" class="icon-button" aria-label="Close">×</button></div>
     <input id="item-id" type="hidden"><input id="item-kind" type="hidden">
     <div id="source-fields" class="form-grid">
-      <label class="wide">Model<input id="source-model" autocomplete="off" placeholder="For example, 55P7L"></label>
+      <label class="wide">Model<span class="model-input-row"><input id="source-model" autocomplete="off" placeholder="For example, 55P7L"><button type="button" class="copy-model-button" data-copy-input="source-model" title="Copy the model name to the clipboard" aria-label="Copy the model name to the clipboard"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="10" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"></path></svg></button></span></label>
       <fieldset class="wide sheet-options"><legend>Product categories</legend><p class="field-help">Select where this model belongs: televisions, soundbars or monitors. These categories match the Excel workbook sheets.</p><label><input type="checkbox" name="source-sheet" value="TV"> TV</label><label><input type="checkbox" name="source-sheet" value="SB"> Soundbars</label><label><input type="checkbox" name="source-sheet" value="Monitors"> Monitors</label></fieldset>
       <details id="direct-shop-links" class="wide shop-link-fields link-fields-details">
         <summary class="link-fields-summary"><span>Direct shop links <span class="muted">(optional overrides)</span></span><span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary>

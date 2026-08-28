@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -16,11 +17,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from . import __version__
 from .assisted_marketplaces import AssistedMarketplaceMonitor
 from .browser_bridge import BrowserBridge, EXTENSION_ORIGIN
-from .catalog import CatalogStore
+from .catalog import CatalogStore, canonicalize
 from .config import Settings
 from .legacy import LegacyService, safe_filename
 from .shops import ShopMonitor
 from .exporter import write_monitoring_export
+from .sources import SOURCE_BY_KEY
 
 
 def timestamped_upload(directory: Path, category: str, original_name: str) -> Path:
@@ -411,10 +413,37 @@ def create_app(
         normalized = name.lower().replace(".", "")
         return any(key.replace(".", "") in normalized for key in allowed)
 
+    def validated_source_url(source_key: str, raw_url: Any) -> str:
+        source = SOURCE_BY_KEY.get(source_key)
+        value = str(raw_url or "").strip()
+        try:
+            parsed = urlparse(value)
+        except ValueError as error:
+            raise HTTPException(400, "Enter a valid source URL") from error
+        expected_host = urlparse(source.base_url).hostname if source else None
+        actual_host = parsed.hostname
+        if not source or parsed.scheme not in {"http", "https"} or not actual_host:
+            raise HTTPException(400, "Enter a valid source URL")
+        if actual_host != expected_host and not actual_host.endswith(f".{expected_host}"):
+            raise HTTPException(400, f"The link must belong to {expected_host}")
+        return value
+
     async def merged_run(run_id: str) -> dict[str, Any]:
         session = catalog.monitoring_session(run_id)
         if not session:
             return await legacy_json("GET", f"/runs/{run_id}")
+        if session.get("cleared_at"):
+            return {
+                "id": run_id,
+                "run_id": run_id,
+                "trigger": "manual",
+                "status": "COMPLETE",
+                "tasks": [],
+                "shop_results": [],
+                "started_at": session["created_at"],
+                "finished_at": session["cleared_at"],
+                "cleared": True,
+            }
         if session["legacy_started"]:
             run = await legacy_json("GET", f"/runs/{run_id}")
             assisted_keys = assisted_marketplace_monitor.supported_keys.intersection(
@@ -439,6 +468,29 @@ def create_app(
             }
         assisted = catalog.assisted_marketplace_run(run_id)
         run["tasks"] = [*run.get("tasks", []), *assisted["results"]]
+        active_items = catalog.list_items("source", "active")
+        item_by_model = {
+            canonicalize(str(item.get("canonical_model") or item.get("model") or "")): item
+            for item in active_items
+        }
+        marketplace_sources = [source for source in catalog.list_sources() if source["kind"] == "marketplace"]
+        for task in run["tasks"]:
+            item = item_by_model.get(canonicalize(str(
+                task.get("canonical_model") or task.get("source_model") or ""
+            )))
+            if item:
+                task.setdefault("item_id", item["id"])
+            if task.get("assisted") or task.get("status") != "SUCCESS" or not item:
+                continue
+            marketplace_name = str(task.get("marketplace") or "")
+            source = next(
+                (entry for entry in marketplace_sources if marketplace_allowed(marketplace_name, [entry["key"]])),
+                None,
+            )
+            offer = task.get("cheapest_in_stock") or task.get("cheapest_pre_order") or {}
+            if source and offer.get("url"):
+                task["marketplace_key"] = source["key"]
+                catalog.remember_source_link(item["id"], source["key"], str(offer["url"]))
         shop = catalog.shop_run(run_id)
         run["shop_results"] = shop["results"]
         if session.get("stopped_at"):
@@ -491,6 +543,10 @@ def create_app(
             return JSONResponse(await merged_run(session["run_id"]))
         return JSONResponse(await legacy_json("GET", "/runs/latest"))
 
+    @app.get("/monitoring-history")
+    async def monitoring_history(limit: int = 20) -> list[dict[str, Any]]:
+        return catalog.list_monitoring_sessions(limit)
+
     @app.get("/runs/{run_id}")
     async def run_status(run_id: str) -> JSONResponse:
         return JSONResponse(await merged_run(run_id))
@@ -511,6 +567,22 @@ def create_app(
         export_path.unlink(missing_ok=True)
         return JSONResponse(await merged_run(run_id))
 
+    @app.post("/runs/{run_id}/clear")
+    async def clear_run_table(run_id: str) -> JSONResponse:
+        session = catalog.monitoring_session(run_id)
+        if not session:
+            raise HTTPException(404, "Monitoring run not found")
+        await shop_monitor.cancel_run(run_id)
+        await assisted_marketplace_monitor.cancel_run(run_id)
+        if session["legacy_started"]:
+            legacy_service.stop()
+            catalog.cancel_legacy_run(app_settings.legacy_database, run_id)
+            await legacy_service.start()
+        catalog.clear_monitoring_session(run_id)
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return JSONResponse(await merged_run(run_id))
+
     @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/retry")
     async def retry_shop_check(run_id: str, item_id: int, shop_key: str) -> dict[str, Any]:
         try:
@@ -522,6 +594,22 @@ def create_app(
         export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
         export_path.unlink(missing_ok=True)
         return {"run_id": run_id, "item_id": item_id, "shop_key": shop_key, "status": "PENDING"}
+
+    @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/link")
+    async def save_shop_link(
+        run_id: str, item_id: int, shop_key: str, payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        url = validated_source_url(shop_key, payload.get("url"))
+        try:
+            catalog.remember_source_link(item_id, shop_key, url)
+            shop_monitor.retry(run_id, item_id, shop_key, method_override="auto")
+        except KeyError as error:
+            raise HTTPException(404, "Shop observation or model not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {"run_id": run_id, "item_id": item_id, "shop_key": shop_key, "status": "PENDING", "url": url}
 
     @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/resolve")
     async def resolve_shop_check(
@@ -563,6 +651,25 @@ def create_app(
             "marketplace_key": marketplace_key, "status": "PENDING",
         }
 
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{marketplace_key}/link")
+    async def save_assisted_marketplace_link(
+        run_id: str, item_id: int, marketplace_key: str, payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        url = validated_source_url(marketplace_key, payload.get("url"))
+        try:
+            catalog.remember_source_link(item_id, marketplace_key, url)
+            assisted_marketplace_monitor.retry(run_id, item_id, marketplace_key)
+        except KeyError as error:
+            raise HTTPException(404, "Marketplace observation or model not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {
+            "run_id": run_id, "item_id": item_id, "marketplace_key": marketplace_key,
+            "status": "PENDING", "url": url,
+        }
+
     @app.post("/runs/{run_id}/marketplaces/{item_id}/{marketplace_key}/resolve")
     async def resolve_assisted_marketplace_check(
         run_id: str,
@@ -580,6 +687,7 @@ def create_app(
                 status,
                 price_eur=float(price) if price not in (None, "") else None,
                 availability=str(payload.get("availability") or "IN_STOCK"),
+                seller_name=str(payload.get("seller_name") or "").strip() or None,
             )
         except KeyError as error:
             raise HTTPException(404, "Assisted marketplace observation not found") from error
@@ -588,6 +696,22 @@ def create_app(
         export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
         export_path.unlink(missing_ok=True)
         return result
+
+    @app.post("/runs/{run_id}/models/{item_id}/retry")
+    async def retry_model(run_id: str, item_id: int) -> dict[str, Any]:
+        if not catalog.monitoring_session(run_id):
+            raise HTTPException(404, "Monitoring run not found")
+        try:
+            shops_started = shop_monitor.retry_model(run_id, item_id)
+            marketplaces_started = assisted_marketplace_monitor.retry_model(run_id, item_id)
+        except KeyError as error:
+            raise HTTPException(404, "Monitoring model not found") from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {
+            "run_id": run_id, "item_id": item_id, "status": "PENDING",
+            "checks_started": shops_started + marketplaces_started,
+        }
 
     @app.get("/history")
     async def history(limit: int = 100) -> Response:

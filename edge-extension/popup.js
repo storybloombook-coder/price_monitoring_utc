@@ -25,8 +25,19 @@ async function refresh() {
   });
   urlInput.value = saved.appUrl;
   closeTabsInput.checked = saved.closeSuccessfulTabs;
-  const state = saved.bridgeStatus;
-  showStatus(state?.status || 'disconnected', state?.message || 'Start PriceMonitor, then connect.');
+  try {
+    const response = await fetch(`${String(saved.appUrl).replace(/\/$/, '')}/browser-bridge/status`, {
+      cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
+    const live = await response.json();
+    const transport = live.transport === 'websocket' ? 'live channel' : live.transport === 'polling' ? 'recovery polling' : 'offline';
+    showStatus(live.connected ? 'connected' : 'disconnected', live.connected
+      ? `Connected to PriceMonitor · ${transport}`
+      : 'PriceMonitor does not see a live extension connection.');
+  } catch (error) {
+    showStatus('disconnected', `PriceMonitor is unavailable: ${String(error?.message || error)}`);
+  }
 }
 
 document.getElementById('save').addEventListener('click', async () => {
@@ -48,3 +59,4 @@ document.getElementById('save').addEventListener('click', async () => {
 });
 
 void refresh();
+window.setInterval(refresh, 2000);

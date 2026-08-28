@@ -2,7 +2,7 @@ const byId = id => document.getElementById(id);
 const HIDDEN_COLUMNS_KEY = 'price-monitor-v4.hidden-columns';
 const SHOP_METHODS = [
   ['auto', 'Auto · gentle fallback'], ['direct', 'Direct request'], ['background', 'Background Edge'],
-  ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual only']
+  ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual discovery · saved links auto']
 ];
 const MARKETPLACE_METHODS = [['auto', 'Auto'], ['legacy', 'Legacy engine']];
 const ASSISTED_MARKETPLACE_METHODS = [['auto', 'Assisted · Edge + manual']];
@@ -31,6 +31,7 @@ const state = {
   resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
   currentRunId: null, lastActionSignature: '', actionItems: [], stopRequested: false,
+  historyLoading: false,
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
 
@@ -54,6 +55,27 @@ function showBanner(kind, message) {
   const target = kind === 'error' ? error : success;
   target.textContent = message; target.hidden = false;
   window.setTimeout(() => { target.hidden = true; }, 5000);
+}
+
+const COPY_ICON = '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="10" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"></path></svg>';
+const CHECK_ICON = '<svg viewBox="0 0 24 24"><path d="m6 12 4 4 8-9"></path></svg>';
+function copyModelButton(model = '') {
+  return `<button type="button" class="copy-model-button" data-copy-model="${escapeHtml(model)}" title="Copy the model name to the clipboard" aria-label="Copy the model name to the clipboard">${COPY_ICON}</button>`;
+}
+async function copyModel(button) {
+  const input = button.dataset.copyInput ? byId(button.dataset.copyInput) : null;
+  const value = String(input?.value || button.dataset.copyModel || '').trim();
+  if (!value) return showBanner('error', 'There is no model name to copy.');
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+    else {
+      const fallback = document.createElement('textarea'); fallback.value = value;
+      fallback.style.position = 'fixed'; fallback.style.opacity = '0'; document.body.appendChild(fallback);
+      fallback.select(); document.execCommand('copy'); fallback.remove();
+    }
+    const original = button.innerHTML; button.classList.add('copied'); button.innerHTML = CHECK_ICON;
+    window.setTimeout(() => { button.classList.remove('copied'); button.innerHTML = original; }, 1600);
+  } catch (error) { showBanner('error', `Could not copy the model: ${error.message}`); }
 }
 
 function badge(label, type, help = STATUS_HELP[type]) {
@@ -149,8 +171,8 @@ function renderSources() {
     const items = shops.filter(item => item.country === country);
     return `<div class="country-block"><span class="country-name">${country}</span><div class="country-shops">${items.length ? items.map(sourceSwitch).join('') : '<span class="muted">No shops configured yet.</span>'}</div></div>`;
   }).join('');
-  byId('shop-link-inputs').innerHTML = shops.map(item => `<label>${escapeHtml(item.name)}<input data-shop-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
-  byId('marketplace-link-inputs').innerHTML = marketplaces.filter(item => item.key === 'salidzini').map(item => `<label>${escapeHtml(item.name)}<input data-marketplace-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
+  byId('shop-link-inputs').innerHTML = shops.map(item => `<label><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener" title="Open ${escapeHtml(item.name)} home page">${escapeHtml(item.name)} ↗</a><input data-shop-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
+  byId('marketplace-link-inputs').innerHTML = marketplaces.filter(item => item.key === 'salidzini').map(item => `<label><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener" title="Open ${escapeHtml(item.name)} home page">${escapeHtml(item.name)} ↗</a><input data-marketplace-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product or search…"></label>`).join('');
   document.querySelectorAll('[data-source-key]').forEach(input => input.addEventListener('change', () => updateSource(input.dataset.sourceKey, input.checked)));
   document.querySelectorAll('[data-source-method]').forEach(select => select.addEventListener('change', () => updateSourceMethod(select.dataset.sourceMethod, select.value)));
   document.querySelectorAll('[data-test-source]').forEach(button => button.addEventListener('click', () => openMethodTest(button.dataset.testSource)));
@@ -323,16 +345,17 @@ function aggregateResults() {
   const rows = new Map();
   const ensure = (model, canonical = '') => {
     const key = String(canonical || model || '').trim().toUpperCase();
-    if (!rows.has(key)) rows.set(key, { key, model: model || canonical, tasks: [], shops: {}, stockQuantity: null, stockCost: null });
+    if (!rows.has(key)) rows.set(key, { key, model: model || canonical, itemId: null, tasks: [], shops: {}, stockQuantity: null, stockCost: null });
     return rows.get(key);
   };
   state.tasks.forEach(task => {
     const row = ensure(task.source_model || task.canonical_model, task.canonical_model);
     if (marketplaceTaskVisible(task)) row.tasks.push(task);
+    if (task.item_id != null) row.itemId = Number(task.item_id);
     if (task.stock_quantity != null) row.stockQuantity = task.stock_quantity; if (task.stock_unit_cost_eur != null) row.stockCost = task.stock_unit_cost_eur;
   });
-  state.shopResults.filter(shopResultVisible).forEach(result => { ensure(result.model, result.model).shops[result.shop_key] = result; });
-  state.sourceOptions.filter(item => !item.paused && item.state !== 'trash').forEach(item => ensure(item.model, item.canonical_model));
+  state.shopResults.filter(shopResultVisible).forEach(result => { const row = ensure(result.model, result.model); row.shops[result.shop_key] = result; row.itemId = Number(result.item_id); });
+  state.sourceOptions.filter(item => !item.paused && item.state !== 'trash').forEach(item => { ensure(item.model, item.canonical_model).itemId = Number(item.id); });
   return [...rows.values()].sort((a, b) => a.model.localeCompare(b.model, undefined, { numeric: true }));
 }
 
@@ -384,10 +407,12 @@ function lowestOffer(row, field) {
 function marketplaceCell(row, openDetails) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces`;
-  const marketplaceLowest = field => row.tasks.map(task => task[field]).filter(Boolean).sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
-  const cheapest = marketplaceLowest('cheapest_in_stock') || marketplaceLowest('cheapest_pre_order');
+  const summaries = row.tasks.map(task => {
+    const offer = task.cheapest_in_stock || task.cheapest_pre_order;
+    return offer ? `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offerLink(offer)}</span>` : `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${badge(task.status.replaceAll('_', ' '), statusClass(task.status))}</span>`;
+  }).join('');
   const details = row.tasks.map(task => `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock)}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order)}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
-  return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${cheapest ? offerLink(cheapest) : `${row.tasks.length} result${row.tasks.length === 1 ? '' : 's'}`}</summary>${details}</details>`;
+  return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
 }
 
 function shopCell(row, shop, openDetails) {
@@ -463,7 +488,8 @@ function renderResults() {
     const marketplacesEnabled = state.sources.some(item => item.kind === 'marketplace' && item.effective_enabled);
     const shopCells = state.sources.filter(item => item.kind === 'shop' && item.effective_enabled).map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
     const marketplaceResultCell = marketplacesEnabled ? cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell') : '';
-    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
+    const refresh = row.itemId ? `<button type="button" class="refresh-model-button" data-refresh-model="${row.itemId}" title="Refresh this model across enabled shops and assisted marketplaces" aria-label="Refresh ${escapeHtml(row.model)}">↻</button>` : '';
+    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', `<span class="result-model"><span>${escapeHtml(row.model)}</span>${refresh}</span>`, 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
@@ -477,7 +503,14 @@ function renderActionRequired(run) {
   review.textContent = items.length ? `Review required checks (${items.length})` : 'Review required checks';
   byId('action-items').innerHTML = items.length ? items.map(item => {
     const link = item.product_url || item.search_url;
-    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.action_name)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Capture again</button><button type="button" class="secondary" data-check-action="not-found" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Mark not found</button><button type="button" class="secondary" data-check-action="manual-price" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Save manual price</button></div></div>`;
+    const identity = `${item.action_kind}:${item.item_id}:${item.action_key}`;
+    const sellerField = item.action_kind === 'marketplaces' && item.action_key === 'salidzini'
+      ? '<label>Seller / shop<input data-action-field="seller" autocomplete="off" placeholder="For example, RD Electronics" required></label>' : '';
+    const attrs = `data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}"`;
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" ${attrs}>Capture again</button>
+      <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
+      <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
+      <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
   }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
 
   if (!items.length) {
@@ -493,38 +526,65 @@ function renderActionRequired(run) {
 }
 
 async function handleActionDialog(event) {
+  const copyButton = event.target.closest('[data-copy-model]');
+  if (copyButton) return copyModel(copyButton);
   const button = event.target.closest('[data-check-action]');
   if (!button || !state.currentRunId) return;
   const action = button.dataset.checkAction;
+  const actionItem = button.closest('.action-item');
+  if (action === 'cancel-popover') {
+    button.closest('.action-popover').hidden = true;
+    return;
+  }
+  if (action.startsWith('toggle-')) {
+    const target = action.replace('toggle-', '');
+    actionItem.querySelectorAll('[data-action-popover]').forEach(popover => {
+      popover.hidden = popover.dataset.actionPopover !== target || !popover.hidden;
+    });
+    const opened = actionItem.querySelector(`[data-action-popover="${target}"]:not([hidden]) input`);
+    if (opened) opened.focus();
+    return;
+  }
   let payload = null;
-  if (action === 'not-found') {
-    if (!window.confirm('Confirm that this model is not available from this source?')) return;
+  if (action === 'confirm-not-found') {
     payload = { status: 'NOT_FOUND' };
   }
-  if (action === 'manual-price') {
-    const entered = window.prompt('Enter the confirmed in-stock price in EUR:');
-    if (entered === null) return;
+  if (action === 'confirm-price') {
+    const entered = actionItem.querySelector('[data-action-field="price"]').value;
     const price = Number(entered.trim().replace(',', '.'));
     if (!Number.isFinite(price) || price < 0) {
-      showBanner('error', 'Enter a valid non-negative price.');
+      const field = actionItem.querySelector('[data-action-field="price"]'); field.setCustomValidity('Enter a valid non-negative price.'); field.reportValidity(); field.setCustomValidity('');
       return;
     }
     payload = { status: 'SUCCESS', price_eur: price, availability: 'IN_STOCK' };
+    const seller = actionItem.querySelector('[data-action-field="seller"]');
+    if (seller) {
+      if (!seller.value.trim()) { seller.setCustomValidity('Enter the seller shown by Salidzini.'); seller.reportValidity(); seller.setCustomValidity(''); return; }
+      payload.seller_name = seller.value.trim();
+    }
+  }
+  if (action === 'confirm-link') {
+    const urlField = actionItem.querySelector('[data-action-field="url"]');
+    if (!urlField.value.trim() || !urlField.checkValidity()) { urlField.reportValidity(); return; }
+    payload = { url: urlField.value.trim() };
   }
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = action === 'retry' ? 'Capturing…' : 'Saving…';
+  button.textContent = action === 'retry' ? 'Capturing…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
   try {
     const base = `/runs/${encodeURIComponent(state.currentRunId)}/${button.dataset.checkKind}/${button.dataset.itemId}/${encodeURIComponent(button.dataset.sourceKey)}`;
     if (action === 'retry') {
       await api(`${base}/retry`, { method: 'POST' });
+    } else if (action === 'confirm-link') {
+      await api(`${base}/link`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     } else {
       await api(`${base}/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     }
     state.lastActionSignature = '';
-    showBanner('success', action === 'retry' ? 'The selected check is capturing again.' : 'Manual result saved.');
+    const message = action === 'retry' ? 'The selected check is capturing again.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
+    const popover = button.closest('.action-popover'); if (popover) { popover.hidden = false; popover.classList.add('saved'); popover.innerHTML = `<span class="popover-success">${CHECK_ICON} ${escapeHtml(message)}</span>`; }
     await pollRun(state.currentRunId);
-    if (action === 'retry') {
+    if (action === 'retry' || action === 'confirm-link') {
       if (state.runPoll) clearInterval(state.runPoll);
       state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
     }
@@ -538,6 +598,17 @@ async function handleActionDialog(event) {
 function renderRun(run) {
   state.currentRunId = run.id || run.run_id;
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
+  if (run.cleared) {
+    byId('progress').hidden = true;
+    byId('run-state').textContent = 'Table cleared.';
+    byId('start-run').disabled = false;
+    byId('clear-run').disabled = true;
+    byId('stop-run').hidden = true;
+    byId('stop-run').disabled = false;
+    renderResults(); renderActionRequired(run);
+    if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
+    return;
+  }
   const all = visibleRunResults(); const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
   const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'INCOMPLETE'].includes(item.status)).length;
   const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
@@ -549,14 +620,53 @@ function renderRun(run) {
   const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
-  if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); }
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
+  if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); loadMonitoringHistory(); }
 }
 
 async function pollRun(runId) { try { renderRun(await api(`/runs/${runId}`)); } catch (error) { if (!state.stopRequested) showBanner('error', error.message); } }
+async function refreshOneModel(event) {
+  const button = event.target.closest('[data-refresh-model]');
+  if (!button || !state.currentRunId) return;
+  button.disabled = true; button.classList.add('spinning');
+  try {
+    const result = await api(`/runs/${encodeURIComponent(state.currentRunId)}/models/${button.dataset.refreshModel}/retry`, { method: 'POST' });
+    showBanner('success', result.checks_started ? `Refreshing ${result.checks_started} enabled checks for this model.` : 'No enabled direct checks are available for this model.');
+    await pollRun(state.currentRunId);
+    if (result.checks_started) {
+      if (state.runPoll) clearInterval(state.runPoll);
+      state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+    }
+  } catch (error) { button.disabled = false; button.classList.remove('spinning'); showBanner('error', error.message); }
+}
+
+async function loadMonitoringHistory() {
+  if (state.historyLoading) return;
+  state.historyLoading = true;
+  try {
+    const runs = await api('/monitoring-history?limit=20');
+    byId('monitoring-history').classList.remove('muted');
+    byId('monitoring-history').innerHTML = runs.length ? runs.map(run => {
+      const checks = Number(run.shop_checks || 0) + Number(run.assisted_checks || 0);
+      const current = run.run_id === state.currentRunId ? ' current' : '';
+      return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString('en-GB'))}</strong><span>${badge(run.status, statusClass(run.status))} · ${checks} direct / assisted checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
+    }).join('') : '<span class="muted">No monitoring runs yet.</span>';
+  } catch (error) { byId('monitoring-history').classList.add('muted'); byId('monitoring-history').textContent = `History unavailable: ${error.message}`; }
+  finally { state.historyLoading = false; }
+}
+
+async function openHistoryRun(event) {
+  const button = event.target.closest('[data-open-run]');
+  if (!button) return;
+  if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
+  button.disabled = true; button.textContent = 'Opening…';
+  try { await pollRun(button.dataset.openRun); await loadMonitoringHistory(); }
+  catch (error) { showBanner('error', error.message); }
+}
+
 async function startRun() {
   byId('start-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
-  try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
+  try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); await loadMonitoringHistory(); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
   catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
 }
 
@@ -570,6 +680,22 @@ async function hardStopRun() {
   } catch (error) {
     state.stopRequested = false; button.disabled = false; showBanner('error', error.message);
   } finally { button.textContent = '■ Hard stop'; }
+}
+
+async function clearCurrentTable() {
+  if (!state.currentRunId || byId('clear-run').disabled) return;
+  if (!window.confirm('Clear all current monitoring results and verification requests? Unfinished checks will be stopped.')) return;
+  const button = byId('clear-run'); button.disabled = true; button.textContent = 'Clearing…'; state.stopRequested = true;
+  try {
+    if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
+    const run = await api(`/runs/${encodeURIComponent(state.currentRunId)}/clear`, { method: 'POST' });
+    state.resultFilterInitialized = false; state.lastActionSignature = '';
+    Object.values(state.resultFilters).forEach(filter => filter.clear());
+    Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+    renderRun(run); showBanner('success', 'Current monitoring table and verification requests were cleared.');
+  } catch (error) {
+    state.stopRequested = false; button.disabled = false; showBanner('error', error.message);
+  } finally { button.textContent = 'Clear table'; }
 }
 
 async function loadExports() {
@@ -588,7 +714,9 @@ function wireEvents() {
   byId('action-close').addEventListener('click', () => byId('action-dialog').close()); byId('action-later').addEventListener('click', () => byId('action-dialog').close());
   byId('method-test-close').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-cancel').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-run').addEventListener('click', runMethodTest);
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('stop-run').addEventListener('click', hardStopRun);
+  byId('result-rows').addEventListener('click', refreshOneModel); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
+  document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
 }
@@ -598,7 +726,7 @@ async function initialize() {
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · monitoring service ${health.legacy_service}`; byId('service-state').classList.add('ok');
     const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
-    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge()]); try { renderRun(await api('/runs/latest')); } catch { renderResults(); }
+    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge(), loadMonitoringHistory()]); try { renderRun(await api('/runs/latest')); await loadMonitoringHistory(); } catch { renderResults(); }
     setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }
 }
