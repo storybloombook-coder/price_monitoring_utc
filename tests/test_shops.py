@@ -47,6 +47,33 @@ def test_rendered_candidates_find_exact_product_and_elisa_total_price() -> None:
     assert parsed["price_eur"] == 199.0
 
 
+def test_search_page_does_not_turn_an_unrelated_price_into_a_product() -> None:
+    html = """
+    <html><head><title>Search 25G64</title>
+    <script type="application/ld+json">
+    {"@type":"Product","name":"Accessory promotion","offers":{"price":"99.00"}}
+    </script></head><body>
+    <a href="/otsing/25g64">25G64 search</a>
+    Search results for 25G64. Weekend service promotion 99.00 EUR.
+    </body></html>
+    """
+    search_url = "https://www.euronics.ee/otsing/25G64"
+    assert find_product_url(html, search_url, "25G64") is None
+    assert parse_product(html, search_url, "25G64") is None
+
+
+def test_search_candidate_requires_an_exact_product_link() -> None:
+    candidates = [{
+        "text": "Search 25G64\nUnrelated campaign\n99.00 EUR",
+        "links": [{"text": "Campaign", "url": "https://www.elesen.lt/campaign"}],
+    }]
+    html = (
+        '<script id="price-monitor-candidates" type="application/json">'
+        + json.dumps(candidates) + "</script>"
+    )
+    assert parse_product(html, "https://www.elesen.lt/rezultatus/25G64", "25G64") is None
+
+
 def test_security_challenge_is_reported_as_action_required() -> None:
     class Store:
         observation = None
@@ -267,6 +294,42 @@ def test_manual_discovery_automatically_checks_a_saved_product_link() -> None:
     assert args[3] == "SUCCESS"
     assert kwargs["price_eur"] == 102.47
     assert kwargs["collection_method"] == "direct"
+
+
+def test_pasted_link_returns_to_action_required_without_source_cooldown() -> None:
+    class Store:
+        observation = None
+
+        def pause_shop_for_protection(self, *args) -> str:
+            raise AssertionError("An ordinary pasted-link mismatch must not pause the whole shop")
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> None:
+            raise AssertionError("Pasted links use the bounded direct parser first")
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, text="<html><body>No exact price</body></html>", request=request)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, Renderer(), "pasted-link", {
+                    "id": 13, "model": "65C8L",
+                    "shop_links": {"varle": "https://www.varle.lt/televizoriai/65c8l.html"},
+                }, {"key": "varle", "collection_method": "manual"},
+                method_override="direct", link_only=True,
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "ACTION_REQUIRED"
+    assert "no exact-model price" in kwargs["error"]
+    assert kwargs["retry_after"] is None
 
 
 def test_shop_run_never_overlaps_requests_to_the_same_domain() -> None:

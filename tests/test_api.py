@@ -3,10 +3,35 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
-from price_monitor_v4.app import create_app
+from price_monitor_v4.app import create_app, normalize_marketplace_task, normalize_shop_result
 from price_monitor_v4.browser_bridge import EXTENSION_ORIGIN
 from price_monitor_v4.catalog import CatalogStore
 from price_monitor_v4.config import Settings
+
+
+def test_success_requires_a_priced_marketplace_offer_with_a_link() -> None:
+    empty = normalize_marketplace_task({"marketplace": "Kaina24", "status": "SUCCESS"})
+    assert empty["status"] == "NOT_FOUND"
+
+    priced = normalize_marketplace_task({
+        "marketplace": "Hinnavaatlus",
+        "status": "SUCCESS",
+        "cheapest_in_stock": {"price_eur": 199, "url": "https://shop.example/?a=1&amp;b=2"},
+    })
+    assert priced["status"] == "SUCCESS"
+    assert priced["cheapest_in_stock"]["url"] == "https://shop.example/?a=1&b=2"
+
+
+def test_old_search_page_price_is_discarded() -> None:
+    result = normalize_shop_result({
+        "status": "SUCCESS",
+        "price_eur": 99,
+        "collection_method": "direct",
+        "product_url": "https://www.euronics.ee/otsing/25g64",
+        "search_url": "https://www.euronics.ee/otsing/25G64",
+    })
+    assert result["status"] == "NOT_FOUND"
+    assert result["price_eur"] is None
 
 
 def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
@@ -24,7 +49,7 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "4.2.0"
+        assert health.json()["version"] == "4.2.1"
         assert health.json()["browser_bridge"]["connected"] is False
         assert health.json()["polite_monitoring"]["per_shop_concurrency"] == 1
         assert client.post("/browser-bridge/heartbeat").status_code == 403

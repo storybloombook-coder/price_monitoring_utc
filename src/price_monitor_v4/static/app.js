@@ -12,7 +12,7 @@ const STATUS_HELP = {
   trash: 'Moved to trash. It is excluded until restored or permanently deleted.',
   monitoring: 'This stock model is linked to an active model in the monitoring list.',
   unmatched: 'This stock position is not linked to an active monitoring model.',
-  success: 'The check completed and returned a usable result.',
+  success: 'An exact model match returned a usable price and a link to the offer.',
   failed: 'The check ended with an error and returned no reliable result.',
   'not-found': 'The source was checked, but no matching model or offer was found.',
   incomplete: 'The check was stopped or could not finish with a reliable result.',
@@ -30,7 +30,7 @@ const state = {
   resultFilters: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
-  currentRunId: null, lastActionSignature: '', actionItems: [], stopRequested: false,
+  currentRunId: null, lastActionSignature: '', actionRenderSignature: '', actionItems: [], stopRequested: false,
   historyLoading: false,
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
@@ -408,7 +408,7 @@ function marketplaceCell(row, openDetails) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces`;
   const summaries = row.tasks.map(task => {
-    const offer = task.cheapest_in_stock || task.cheapest_pre_order;
+    const offer = task.status === 'SUCCESS' ? task.cheapest_in_stock || task.cheapest_pre_order : null;
     return offer ? `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offerLink(offer)}</span>` : `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${badge(task.status.replaceAll('_', ' '), statusClass(task.status))}</span>`;
   }).join('');
   const details = row.tasks.map(task => `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock)}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order)}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
@@ -501,7 +501,17 @@ function renderActionRequired(run) {
   const review = byId('review-actions');
   review.hidden = items.length === 0;
   review.textContent = items.length ? `Review required checks (${items.length})` : 'Review required checks';
-  byId('action-items').innerHTML = items.length ? items.map(item => {
+  const renderSignature = JSON.stringify(items.map(item => ({
+    identity: `${item.action_kind}:${item.item_id}:${item.action_key}`,
+    model: item.model,
+    name: item.action_name,
+    error: item.error || '',
+    product_url: item.product_url || '',
+    search_url: item.search_url || '',
+  })));
+  if (renderSignature !== state.actionRenderSignature) {
+    state.actionRenderSignature = renderSignature;
+    byId('action-items').innerHTML = items.length ? items.map(item => {
     const link = item.product_url || item.search_url;
     const identity = `${item.action_kind}:${item.item_id}:${item.action_key}`;
     const sellerField = item.action_kind === 'marketplaces' && item.action_key === 'salidzini'
@@ -511,7 +521,8 @@ function renderActionRequired(run) {
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
-  }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
+    }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
+  }
 
   if (!items.length) {
     state.lastActionSignature = '';
@@ -665,7 +676,7 @@ async function openHistoryRun(event) {
 }
 
 async function startRun() {
-  byId('start-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+  byId('start-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
   try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); await loadMonitoringHistory(); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
   catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
 }
@@ -689,7 +700,7 @@ async function clearCurrentTable() {
   try {
     if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
     const run = await api(`/runs/${encodeURIComponent(state.currentRunId)}/clear`, { method: 'POST' });
-    state.resultFilterInitialized = false; state.lastActionSignature = '';
+    state.resultFilterInitialized = false; state.lastActionSignature = ''; state.actionRenderSignature = '';
     Object.values(state.resultFilters).forEach(filter => filter.clear());
     Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
     renderRun(run); showBanner('success', 'Current monitoring table and verification requests were cleared.');

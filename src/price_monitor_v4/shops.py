@@ -43,9 +43,16 @@ CANDIDATE_RE = re.compile(
 class ActionRequiredError(ValueError):
     """The shop requires a visible, human-controlled browser session."""
 
-    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry_after_seconds: float | None = None,
+        *,
+        pause_source: bool = True,
+    ) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+        self.pause_source = pause_source
 
 
 class ProtectionBlockedError(ActionRequiredError):
@@ -86,6 +93,8 @@ class ProductDocument(HTMLParser):
         self.itemprops: dict[str, str] = {}
         self._link: dict[str, str] | None = None
         self._json: list[str] | None = None
+        self._title: list[str] | None = None
+        self.title = ""
         self._text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -98,6 +107,8 @@ class ProductDocument(HTMLParser):
                 self.meta[key.lower()] = values["content"].strip()
         if tag == "script" and "ld+json" in values.get("type", "").lower():
             self._json = []
+        if tag == "title":
+            self._title = []
         itemprop = values.get("itemprop", "").lower()
         if itemprop and values.get("content"):
             self.itemprops[itemprop] = values["content"].strip()
@@ -110,12 +121,17 @@ class ProductDocument(HTMLParser):
         if tag == "script" and self._json is not None:
             self.json_blocks.append("".join(self._json).strip())
             self._json = None
+        if tag == "title" and self._title is not None:
+            self.title = re.sub(r"\s+", " ", " ".join(self._title)).strip()
+            self._title = None
 
     def handle_data(self, data: str) -> None:
         if self._link is not None:
             self._link["text"] += " " + data
         if self._json is not None:
             self._json.append(data)
+        if self._title is not None:
+            self._title.append(data)
         if data.strip():
             self._text.append(data.strip())
 
@@ -160,6 +176,21 @@ def availability_label(value: Any, text: str = "") -> str:
     return "UNKNOWN"
 
 
+def is_search_listing_url(value: str) -> bool:
+    """Return True for retailer search/listing URLs that are not product evidence."""
+    parsed = urlparse(value or "")
+    path = unquote(parsed.path).lower()
+    return any(token in path for token in (
+        "/search", "/otsing", "/rezultatus", "/paieska", "/paieška", "/word/",
+    ))
+
+
+def exact_model_match(expected: str, *values: Any) -> bool:
+    return bool(expected and any(
+        expected in canonicalize(str(value or "")).replace(" ", "") for value in values
+    ))
+
+
 def parse_product(html: str, url: str, model: str) -> dict[str, Any] | None:
     document = ProductDocument()
     document.feed(html)
@@ -176,8 +207,15 @@ def parse_product(html: str, url: str, model: str) -> dict[str, Any] | None:
                 candidates.append(item)
     expected = canonicalize(model).replace(" ", "")
     product = next(
-        (item for item in candidates if expected in canonicalize(str(item.get("name", ""))).replace(" ", "")),
-        candidates[0] if candidates else None,
+        (
+            item for item in candidates
+            if exact_model_match(
+                expected,
+                item.get("name"), item.get("sku"), item.get("mpn"),
+                item.get("model"), item.get("productID"),
+            )
+        ),
+        None,
     )
     if product:
         offers = product.get("offers") or {}
@@ -192,41 +230,70 @@ def parse_product(html: str, url: str, model: str) -> dict[str, Any] | None:
                     "availability": availability_label(offers.get("availability"), document.text[:5000]),
                     "product_url": urljoin(url, str(offers.get("url") or product.get("url") or url)),
                 }
-    meta_price = normalize_price(
+    candidate_match = CANDIDATE_RE.search(html or "")
+    try:
+        rendered_candidates = json.loads(candidate_match.group(1)) if candidate_match else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        rendered_candidates = []
+    for candidate in rendered_candidates if isinstance(rendered_candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        text = str(candidate.get("text") or "")
+        if not exact_model_match(expected, text):
+            continue
+        exact_links: list[str] = []
+        for link in candidate.get("links") or []:
+            if not isinstance(link, dict) or not link.get("url"):
+                continue
+            link_url = urljoin(url, str(link["url"]))
+            if exact_model_match(expected, link.get("text"), unquote(urlparse(link_url).path)):
+                exact_links.append(link_url)
+        # A search page may contain the query and an unrelated promotional price in
+        # the same container. It is only product evidence when the container also
+        # has an exact-model product link.
+        if is_search_listing_url(url) and not exact_links:
+            continue
+        # Elisa exposes the monthly instalment before the actual product total.
+        total_match = re.search(
+            r"(?:toote\s+hind|total\s+price)\s*[:\-]?\s*" + MONEY_RE.pattern,
+            text, re.IGNORECASE,
+        )
+        price_match = total_match or MONEY_RE.search(text)
+        price = normalize_price(price_match.group(price_match.lastindex or 1)) if price_match else None
+        if price is not None:
+            return {
+                "title": next(
+                    (str(link.get("text") or "") for link in candidate.get("links") or []
+                     if isinstance(link, dict) and exact_model_match(expected, link.get("text"))),
+                    document.meta.get("og:title") or document.title or model,
+                ),
+                "price_eur": price,
+                "availability": availability_label(None, text),
+                "product_url": exact_links[0] if exact_links else url,
+            }
+
+    page_title = document.meta.get("og:title") or document.meta.get("twitter:title") or document.title
+    strong_product_page = not is_search_listing_url(url) and exact_model_match(
+        expected, page_title, unquote(urlparse(url).path)
+    )
+    if not strong_product_page:
+        return None
+    price = normalize_price(
         document.meta.get("product:price:amount")
         or document.meta.get("og:price:amount")
         or document.itemprops.get("price")
     )
-    if meta_price is None:
+    if price is None:
         match = MONEY_RE.search(document.text)
-        meta_price = normalize_price(match.group(1)) if match else None
-    if meta_price is None:
-        candidate_match = CANDIDATE_RE.search(html or "")
-        try:
-            rendered_candidates = json.loads(candidate_match.group(1)) if candidate_match else []
-        except (TypeError, ValueError, json.JSONDecodeError):
-            rendered_candidates = []
-        for candidate in rendered_candidates if isinstance(rendered_candidates, list) else []:
-            text = str(candidate.get("text") or "") if isinstance(candidate, dict) else ""
-            if expected not in canonicalize(text).replace(" ", ""):
-                continue
-            # Elisa exposes the monthly payment before the actual product total.
-            total_match = re.search(
-                r"(?:toote\s+hind|total\s+price)\s*[:\-]?\s*" + MONEY_RE.pattern,
-                text, re.IGNORECASE,
-            )
-            price_match = total_match or MONEY_RE.search(text)
-            if price_match:
-                meta_price = normalize_price(price_match.group(price_match.lastindex or 1))
-                if meta_price is not None:
-                    break
-    if meta_price is None:
+        price = normalize_price(match.group(1)) if match else None
+    if price is None:
         return None
     return {
-        "title": document.meta.get("og:title") or document.meta.get("twitter:title") or model,
-        "price_eur": meta_price,
+        "title": page_title or model,
+        "price_eur": price,
         "availability": availability_label(
-            document.meta.get("product:availability") or document.itemprops.get("availability"), document.text[:5000]
+            document.meta.get("product:availability") or document.itemprops.get("availability"),
+            document.text[:5000],
         ),
         "product_url": url,
     }
@@ -241,7 +308,7 @@ def find_product_url(html: str, base_url: str, model: str) -> str | None:
     for link in document.links:
         url = urljoin(base_url, link["href"])
         parsed = urlparse(url)
-        if parsed.netloc != host or parsed.fragment:
+        if parsed.netloc != host or parsed.fragment or is_search_listing_url(url):
             continue
         # Do not score the search query itself: every link on ?q=55T7B would
         # otherwise look like a model match (including "#content").
@@ -268,7 +335,7 @@ def find_product_url(html: str, base_url: str, model: str) -> str | None:
                 continue
             url = urljoin(base_url, str(link["url"]))
             parsed = urlparse(url)
-            if parsed.netloc != host or parsed.fragment:
+            if parsed.netloc != host or parsed.fragment or is_search_listing_url(url):
                 continue
             link_text = canonicalize(str(link.get("text") or "")).replace(" ", "")
             path = unquote(parsed.path)
@@ -524,6 +591,7 @@ class ShopMonitor:
         shop: dict[str, Any],
         playwright_renderer: PlaywrightRenderer | None = None,
         method_override: str | None = None,
+        link_only: bool = False,
     ) -> None:
         attempts: list[dict[str, Any]] = []
         selected_method = method_override or str(shop.get("collection_method") or "auto")
@@ -674,11 +742,22 @@ class ShopMonitor:
                     html, resolved_url = await fetch(manual_url)
                     product_url = resolved_url
                     parsed = parse_product(html, resolved_url, model["model"])
-                except (httpx.HTTPError, CollectionMethodUnavailable, RenderRequiredError):
+                    if not parsed:
+                        discovered_url = find_product_url(html, resolved_url, model["model"])
+                        if discovered_url and discovered_url != resolved_url:
+                            product_html, product_resolved_url = await fetch(discovered_url)
+                            product_url = product_resolved_url
+                            parsed = parse_product(product_html, product_resolved_url, model["model"])
+                except (httpx.HTTPError, CollectionMethodUnavailable, RenderRequiredError) as error:
+                    if link_only:
+                        raise ActionRequiredError(
+                            "The saved link needs browser verification; open it and use Capture again",
+                            pause_source=False,
+                        ) from error
                     # A saved URL is a fast path, not a permanent dead end. Search again
                     # when the retailer has moved or removed the old product page.
                     parsed = None
-            if not parsed and search_url and search_url != manual_url:
+            if not parsed and not link_only and search_url and search_url != manual_url:
                 search_html, search_resolved_url = await fetch(search_url)
                 product_url = find_product_url(search_html, search_resolved_url, model["model"]) or ""
                 if product_url:
@@ -693,6 +772,11 @@ class ShopMonitor:
                     run_id, model["id"], shop["key"], "SUCCESS", search_url=search_url,
                     collection_method=used_method or selected_method, attempts=attempts, **parsed
                 )
+            elif link_only:
+                raise ActionRequiredError(
+                    "The saved page opened, but no exact-model price was found; verify it in the browser",
+                    pause_source=False,
+                )
             else:
                 self.store.finish_shop_observation(
                     run_id, model["id"], shop["key"], "NOT_FOUND", product_url=product_url or None,
@@ -701,7 +785,7 @@ class ShopMonitor:
                 )
         except ActionRequiredError as error:
             cooldown_until = None
-            if selected_method != "manual" or manual_url:
+            if error.pause_source and (selected_method != "manual" or manual_url):
                 cooldown_until = self.store.pause_shop_for_protection(
                     run_id,
                     shop["key"],
@@ -719,9 +803,23 @@ class ShopMonitor:
                 search_url=search_url, error=str(error)[:500],
                 collection_method=used_method or selected_method, attempts=attempts,
             )
+        except Exception as error:
+            # A retry must always leave PENDING, even when an unexpected collector
+            # bug occurs. Otherwise the UI can remain on Checking indefinitely.
+            self.store.finish_shop_observation(
+                run_id, model["id"], shop["key"], "FAILED", product_url=manual_url,
+                search_url=search_url, error=f"Unexpected collector error: {error}"[:500],
+                collection_method=used_method or selected_method, attempts=attempts,
+            )
 
     def retry(
-        self, run_id: str, item_id: int, shop_key: str, *, method_override: str | None = None
+        self,
+        run_id: str,
+        item_id: int,
+        shop_key: str,
+        *,
+        method_override: str | None = None,
+        link_only: bool = False,
     ) -> None:
         model = self.store.get_item(item_id)
         shop = next(
@@ -754,6 +852,7 @@ class ShopMonitor:
                     await self._check_one(
                         client, renderer, run_id, model, shop, playwright_renderer,
                         method_override=method_override,
+                        link_only=link_only,
                     )
             finally:
                 await renderer.close()

@@ -838,6 +838,8 @@ class CatalogStore:
                             "collection_method,attempts_json "
                             "FROM shop_observations WHERE run_id<>? AND item_id=? AND shop_key=? "
                             "AND status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=? "
+                            "AND (collection_method='manual' OR (product_url IS NOT NULL "
+                            "AND lower(product_url)<>lower(COALESCE(search_url,'')))) "
                             "ORDER BY checked_at DESC LIMIT 1",
                             (run_id, model["id"], shop["key"], cutoff),
                         ).fetchone()

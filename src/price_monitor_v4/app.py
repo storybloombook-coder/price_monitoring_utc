@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import shutil
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -20,7 +21,7 @@ from .browser_bridge import BrowserBridge, EXTENSION_ORIGIN
 from .catalog import CatalogStore, canonicalize
 from .config import Settings
 from .legacy import LegacyService, safe_filename
-from .shops import ShopMonitor
+from .shops import ShopMonitor, is_search_listing_url
 from .exporter import write_monitoring_export
 from .sources import SOURCE_BY_KEY
 
@@ -30,6 +31,69 @@ def timestamped_upload(directory: Path, category: str, original_name: str) -> Pa
     suffix = Path(original_name).suffix.lower()
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"{category}-{stamp}{suffix}"
+
+
+def normalized_resource_url(value: str | None) -> tuple[str, str, str, str] | None:
+    if not value:
+        return None
+    parsed = urlparse(html.unescape(str(value)))
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        unquote(parsed.path).rstrip("/").lower(),
+        unquote(parsed.query).lower(),
+    )
+
+
+def normalize_marketplace_task(task: dict[str, Any]) -> dict[str, Any]:
+    """SUCCESS means that the UI can show both a price and a usable offer link."""
+    result = dict(task)
+    for field in ("cheapest_in_stock", "cheapest_pre_order"):
+        if isinstance(result.get(field), dict):
+            result[field] = dict(result[field])
+    if result.get("status") != "SUCCESS":
+        return result
+    offer = result.get("cheapest_in_stock") or result.get("cheapest_pre_order")
+    if not isinstance(offer, dict) or offer.get("price_eur") is None:
+        result["status"] = "NOT_FOUND"
+        result["error"] = result.get("error") or "No priced exact-model offer was returned"
+        result["cheapest_in_stock"] = None
+        result["cheapest_pre_order"] = None
+        return result
+    fallback_url = result.get("product_url") or result.get("search_url")
+    for field in ("cheapest_in_stock", "cheapest_pre_order"):
+        priced_offer = result.get(field)
+        if isinstance(priced_offer, dict) and priced_offer.get("price_eur") is not None:
+            source_url = priced_offer.get("url") or fallback_url
+            if source_url:
+                priced_offer["url"] = html.unescape(str(source_url))
+    primary = result.get("cheapest_in_stock") or result.get("cheapest_pre_order")
+    if not primary.get("url"):
+        result["status"] = "INCOMPLETE"
+        result["error"] = result.get("error") or "The priced offer did not include a usable link"
+    return result
+
+
+def normalize_shop_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Discard old generic prices that were scraped from a search page itself."""
+    normalized = dict(result)
+    product_url = normalized.get("product_url")
+    search_url = normalized.get("search_url")
+    invalid_search_price = (
+        normalized.get("status") == "SUCCESS"
+        and normalized.get("collection_method") != "manual"
+        and is_search_listing_url(str(product_url or ""))
+        and normalized_resource_url(product_url) == normalized_resource_url(search_url)
+    )
+    if invalid_search_price:
+        normalized.update({
+            "status": "NOT_FOUND",
+            "title": None,
+            "price_eur": None,
+            "availability": None,
+            "error": "Discarded an unverified price from a search page; no exact product link was found",
+        })
+    return normalized
 
 
 def create_app(
@@ -467,7 +531,10 @@ def create_app(
                 "started_at": session["created_at"],
             }
         assisted = catalog.assisted_marketplace_run(run_id)
-        run["tasks"] = [*run.get("tasks", []), *assisted["results"]]
+        run["tasks"] = [
+            normalize_marketplace_task(task)
+            for task in [*run.get("tasks", []), *assisted["results"]]
+        ]
         active_items = catalog.list_items("source", "active")
         item_by_model = {
             canonicalize(str(item.get("canonical_model") or item.get("model") or "")): item
@@ -492,7 +559,7 @@ def create_app(
                 task["marketplace_key"] = source["key"]
                 catalog.remember_source_link(item["id"], source["key"], str(offer["url"]))
         shop = catalog.shop_run(run_id)
-        run["shop_results"] = shop["results"]
+        run["shop_results"] = [normalize_shop_result(result) for result in shop["results"]]
         if session.get("stopped_at"):
             run["status"] = "INCOMPLETE"
         elif (
@@ -602,7 +669,12 @@ def create_app(
         url = validated_source_url(shop_key, payload.get("url"))
         try:
             catalog.remember_source_link(item_id, shop_key, url)
-            shop_monitor.retry(run_id, item_id, shop_key, method_override="auto")
+            # A pasted link gets a bounded direct parse first. If the retailer needs
+            # JavaScript or a challenge, return it to Action required promptly instead
+            # of hiding the item behind the extension's long human-verification wait.
+            shop_monitor.retry(
+                run_id, item_id, shop_key, method_override="direct", link_only=True
+            )
         except KeyError as error:
             raise HTTPException(404, "Shop observation or model not found") from error
         except ValueError as error:
