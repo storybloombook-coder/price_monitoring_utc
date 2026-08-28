@@ -235,6 +235,7 @@ function rowStatus(row) {
   const statuses = [...row.tasks.map(item => item.status), ...Object.values(row.shops).map(item => item.status)];
   if (statuses.some(value => ['RUNNING', 'PENDING'].includes(value))) return 'RUNNING';
   if (statuses.some(value => value === 'ACTION_REQUIRED')) return 'ACTION_REQUIRED';
+  if (statuses.some(value => value === 'COOLDOWN')) return 'COOLDOWN';
   if (statuses.some(value => value === 'SUCCESS')) return 'SUCCESS';
   if (statuses.some(value => value === 'FAILED')) return 'FAILED';
   if (statuses.some(value => value === 'INCOMPLETE')) return 'INCOMPLETE';
@@ -248,6 +249,8 @@ function resultCounts(row) {
     failed: statuses.filter(value => ['FAILED', 'INCOMPLETE'].includes(value)).length,
     notFound: statuses.filter(value => value === 'NOT_FOUND').length,
     actionRequired: statuses.filter(value => value === 'ACTION_REQUIRED').length,
+    cooldown: statuses.filter(value => value === 'COOLDOWN').length,
+    cached: Object.values(row.shops).filter(item => item.status === 'SUCCESS' && item.cached).length,
     pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
   };
 }
@@ -258,6 +261,8 @@ function statusCell(row) {
   parts.push(badge(`Failed ${counts.failed}`, counts.failed ? 'failed' : 'not-found'));
   parts.push(badge(`Not found ${counts.notFound}`, 'not-found'));
   if (counts.actionRequired) parts.push(badge(`Action required ${counts.actionRequired}`, 'action-required'));
+  if (counts.cooldown) parts.push(badge(`Cooldown ${counts.cooldown}`, 'cooldown'));
+  if (counts.cached) parts.push(badge(`Cached ${counts.cached}`, 'cached'));
   if (counts.pending) parts.push(badge(`Pending ${counts.pending}`, 'incomplete'));
   return `<span class="status-counts">${parts.join(' ')}</span>`;
 }
@@ -283,9 +288,11 @@ function shopCell(row, shop) {
   const item = row.shops[shop.key];
   if (!shop.effective_enabled && !item) return '<span class="muted">Disabled</span>';
   if (!item) return '—';
-  const link = item.product_url || item.search_url; const summary = item.status === 'SUCCESS' ? euro(item.price_eur) : item.status === 'PENDING' ? 'Checking…' : item.status.replaceAll('_', ' ');
+  const link = item.product_url || item.search_url;
+  const retryLabel = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : null;
+  const summary = item.status === 'SUCCESS' ? `${euro(item.price_eur)}${item.cached ? ' · cached' : ''}` : item.status === 'PENDING' ? 'Checking…' : item.status === 'COOLDOWN' ? 'Cooldown' : item.status.replaceAll('_', ' ');
   const linkLabel = item.status === 'ACTION_REQUIRED' ? 'Open verification' : `Open ${item.product_url ? 'product' : 'search'}`;
-  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
+  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
 }
 
 function columns() {
@@ -395,9 +402,11 @@ function renderRun(run) {
   const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'INCOMPLETE'].includes(item.status)).length;
   const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
   const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
+  const cooldown = all.filter(item => item.status === 'COOLDOWN').length;
+  const cached = state.shopResults.filter(item => item.status === 'SUCCESS' && item.cached).length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
-  const actionText = actionRequired ? ` · Action required ${actionRequired}` : '';
+  const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
   byId('start-run').disabled = run.status === 'RUNNING'; byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
@@ -447,6 +456,7 @@ async function initialize() {
   wireEvents();
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · monitoring service ${health.legacy_service}`; byId('service-state').classList.add('ok');
+    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
     await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge()]); try { renderRun(await api('/runs/latest')); } catch { renderResults(); }
     setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }

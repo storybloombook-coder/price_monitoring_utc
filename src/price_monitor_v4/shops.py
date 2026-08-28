@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import tempfile
 from html.parser import HTMLParser
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlparse
@@ -25,6 +28,27 @@ MONEY_RE = re.compile(r"(?<!\d)(\d{1,5}(?:[\s.,]\d{3})*(?:[.,]\d{2})?)\s*(?:€|
 
 class ActionRequiredError(ValueError):
     """The shop requires a visible, human-controlled browser session."""
+
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def retry_after_seconds(value: str | None, default: float) -> float:
+    if not value:
+        return default
+    text = value.strip()
+    try:
+        return max(1.0, min(float(text), 86_400.0))
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(1.0, min((parsed - datetime.now(UTC)).total_seconds(), 86_400.0))
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 class ProductDocument(HTMLParser):
@@ -299,11 +323,23 @@ async def fetch_rendered_html(url: str, timeout_seconds: float) -> str | None:
 
 class ShopMonitor:
     def __init__(
-        self, store: CatalogStore, timeout_seconds: float = 20, browser_bridge: BrowserBridge | None = None
+        self,
+        store: CatalogStore,
+        timeout_seconds: float = 20,
+        browser_bridge: BrowserBridge | None = None,
+        *,
+        request_delay_min_seconds: float = 8,
+        request_delay_max_seconds: float = 15,
+        cooldown_seconds: float = 3600,
+        cache_ttl_seconds: float = 14_400,
     ) -> None:
         self.store = store
         self.timeout_seconds = timeout_seconds
         self.browser_bridge = browser_bridge
+        self.request_delay_min_seconds = max(0, request_delay_min_seconds)
+        self.request_delay_max_seconds = max(self.request_delay_min_seconds, request_delay_max_seconds)
+        self.cooldown_seconds = max(1, cooldown_seconds)
+        self.cache_ttl_seconds = max(0, cache_ttl_seconds)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._browser_semaphore = asyncio.Semaphore(1)
         self._extension_semaphore = asyncio.Semaphore(1)
@@ -315,12 +351,11 @@ class ShopMonitor:
         self._extension_blocked.clear()
         models = [item for item in self.store.list_items("source", "active") if not item["paused"]]
         shops = [item for item in self.store.list_sources() if item["kind"] == "shop" and item["effective_enabled"]]
-        self.store.start_shop_run(run_id, models, shops)
+        self.store.start_shop_run(run_id, models, shops, self.cache_ttl_seconds)
         if models and shops:
             self._tasks[run_id] = asyncio.create_task(self._run(run_id, models, shops))
 
     async def _run(self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]) -> None:
-        semaphore = asyncio.Semaphore(4)
         renderer = EdgeRenderer(self.timeout_seconds)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -328,14 +363,24 @@ class ShopMonitor:
             "Accept-Language": "en-US,en;q=0.9,lt;q=0.8,et;q=0.7",
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
-            async def one(model: dict[str, Any], shop: dict[str, Any]) -> None:
-                async with semaphore:
+            async def one_shop(shop: dict[str, Any]) -> None:
+                ordered_models = sorted(
+                    models,
+                    key=lambda model: not bool((model.get("shop_links") or {}).get(shop["key"])),
+                )
+                sent_request = False
+                for model in ordered_models:
+                    if not self.store.shop_observation_pending(run_id, model["id"], shop["key"]):
+                        continue
+                    if sent_request:
+                        await asyncio.sleep(random.uniform(
+                            self.request_delay_min_seconds, self.request_delay_max_seconds
+                        ))
                     await self._check_one(client, renderer, run_id, model, shop)
-            jobs = [(model, shop) for model in models for shop in shops]
-            # Direct links are the fastest and most reliable checks, so process them first.
-            jobs.sort(key=lambda pair: (not bool((pair[0].get("shop_links") or {}).get(pair[1]["key"])), pair[1]["sort_order"]))
+                    sent_request = True
             try:
-                await asyncio.gather(*(one(model, shop) for model, shop in jobs))
+                # Shops may progress independently, but a single domain is always sequential.
+                await asyncio.gather(*(one_shop(shop) for shop in shops))
             finally:
                 await renderer.close()
         self._tasks.pop(run_id, None)
@@ -393,15 +438,21 @@ class ShopMonitor:
             async def fetch(url: str) -> tuple[str, str]:
                 try:
                     response = await client.get(url)
+                    if response.status_code == 429:
+                        delay = retry_after_seconds(response.headers.get("retry-after"), self.cooldown_seconds)
+                        raise ActionRequiredError(
+                            "The shop rate-limited this IP. Requests are paused to avoid a longer block.", delay
+                        )
                     response.raise_for_status()
                     html = response.text
-                    if security_challenge(html) or incomplete_catalog_render(html):
+                    challenged = response.headers.get("cf-mitigated", "").lower() == "challenge"
+                    if challenged or security_challenge(html) or incomplete_catalog_render(html):
                         if self.browser_bridge and self.browser_bridge.connected:
                             return await fetch_from_extension(str(response.url))
                         return await fetch_from_local_edge(str(response.url))
                     return html, str(response.url)
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code not in {403, 429}:
+                    if error.response.status_code != 403:
                         raise
                     if self.browser_bridge and self.browser_bridge.connected:
                         return await fetch_from_extension(url)
@@ -427,9 +478,15 @@ class ShopMonitor:
                     search_url=search_url, error="No matching product price was found"
                 )
         except ActionRequiredError as error:
+            cooldown_until = self.store.pause_shop_for_protection(
+                run_id,
+                shop["key"],
+                error.retry_after_seconds or self.cooldown_seconds,
+                str(error),
+            )
             self.store.finish_shop_observation(
                 run_id, model["id"], shop["key"], "ACTION_REQUIRED", product_url=manual_url,
-                search_url=search_url, error=str(error)[:500]
+                search_url=search_url, error=str(error)[:500], retry_after=cooldown_until,
             )
         except (httpx.HTTPError, ValueError, OSError) as error:
             self.store.finish_shop_observation(

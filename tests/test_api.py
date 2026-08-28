@@ -26,6 +26,7 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert health.status_code == 200
         assert health.json()["version"] == "4.0.0"
         assert health.json()["browser_bridge"]["connected"] is False
+        assert health.json()["polite_monitoring"]["per_shop_concurrency"] == 1
         assert client.post("/browser-bridge/heartbeat").status_code == 403
         heartbeat = client.post("/browser-bridge/heartbeat", headers={"origin": EXTENSION_ORIGIN})
         assert heartbeat.status_code == 200

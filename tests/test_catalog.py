@@ -172,3 +172,36 @@ def test_hard_stop_finalizes_shop_and_legacy_work(tmp_path: Path) -> None:
     with sqlite3.connect(legacy_database) as db:
         assert db.execute("SELECT status FROM monitoring_runs").fetchone()[0] == "INCOMPLETE"
         assert db.execute("SELECT status FROM marketplace_tasks").fetchone()[0] == "INCOMPLETE"
+
+
+def test_shop_cache_and_protection_cooldown_persist_between_runs(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "25G64"})
+    shop = next(item for item in store.list_sources() if item["key"] == "bite")
+
+    store.register_monitoring_session("cache-source", False, [])
+    store.start_shop_run("cache-source", [source], [shop])
+    store.finish_shop_observation(
+        "cache-source", source["id"], "bite", "SUCCESS", title="TCL 25G64",
+        price_eur=176.4, availability="IN_STOCK", product_url="https://www.bite.lt/example",
+    )
+    store.register_monitoring_session("cache-target", False, [])
+    store.start_shop_run("cache-target", [source], [shop], cache_ttl_seconds=14_400)
+    cached = store.shop_run("cache-target")["results"][0]
+    assert cached["status"] == "SUCCESS"
+    assert cached["cached"] is True
+    assert cached["price_eur"] == 176.4
+    assert not store.shop_observation_pending("cache-target", source["id"], "bite")
+
+    store.register_monitoring_session("blocked-source", False, [])
+    store.start_shop_run("blocked-source", [source], [shop])
+    retry_after = store.pause_shop_for_protection("blocked-source", "bite", 3600, "Rate limited")
+    blocked = store.shop_run("blocked-source")["results"][0]
+    assert blocked["status"] == "COOLDOWN"
+    assert blocked["retry_after"] == retry_after
+
+    store.register_monitoring_session("blocked-target", False, [])
+    store.start_shop_run("blocked-target", [source], [shop], cache_ttl_seconds=0)
+    assert store.shop_run("blocked-target")["results"][0]["status"] == "COOLDOWN"
+    store.retry_shop_observation("blocked-target", source["id"], "bite")
+    assert store.shop_run("blocked-target")["results"][0]["status"] == "PENDING"

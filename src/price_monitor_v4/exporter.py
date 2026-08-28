@@ -11,7 +11,7 @@ from .sources import SHOPS
 
 
 TERMINAL_PRIORITY = {
-    "ACTION_REQUIRED": 7, "RUNNING": 6, "PENDING": 6, "FAILED": 5, "INCOMPLETE": 4,
+    "ACTION_REQUIRED": 8, "RUNNING": 7, "PENDING": 7, "COOLDOWN": 6, "FAILED": 5, "INCOMPLETE": 4,
     "SUCCESS": 3, "NOT_FOUND": 2, "NOT_STARTED": 1,
 }
 
@@ -114,7 +114,7 @@ def write_monitoring_export(
         ])
 
     details = workbook.create_sheet("Offer details")
-    details.append(["Model", "Source type", "Source", "Status", "Title", "Price EUR", "Availability", "URL", "Checked at", "Error"])
+    details.append(["Model", "Source type", "Source", "Status", "Title", "Price EUR", "Availability", "URL", "Checked at", "Cached", "Retry after", "Error"])
     for key, tasks in tasks_by_model.items():
         for task in tasks:
             for field, availability in (("cheapest_in_stock", "IN_STOCK"), ("cheapest_pre_order", "PRE_ORDER")):
@@ -123,16 +123,17 @@ def write_monitoring_export(
                     details.append([
                         model_names[key], "Marketplace", task.get("marketplace"), task.get("status"),
                         task.get("matched_title"), price(offer), availability, offer.get("url"),
-                        task.get("finished_at"), task.get("error"),
+                        task.get("finished_at"), False, None, task.get("error"),
                     ])
             if not task.get("cheapest_in_stock") and not task.get("cheapest_pre_order"):
-                details.append([model_names[key], "Marketplace", task.get("marketplace"), task.get("status"), task.get("matched_title"), None, None, task.get("product_url"), task.get("finished_at"), task.get("error")])
+                details.append([model_names[key], "Marketplace", task.get("marketplace"), task.get("status"), task.get("matched_title"), None, None, task.get("product_url"), task.get("finished_at"), False, None, task.get("error")])
     for key, items in shops_by_model.items():
         for item in items:
             details.append([
                 model_names[key], "Shop", item.get("shop_name") or item.get("shop_key"), item.get("status"),
                 item.get("title"), price(item), item.get("availability"),
-                item.get("product_url") or item.get("search_url"), item.get("checked_at"), item.get("error"),
+                item.get("product_url") or item.get("search_url"), item.get("checked_at"),
+                bool(item.get("cached")), item.get("retry_after"), item.get("error"),
             ])
 
     header_fill = PatternFill("solid", fgColor="146C43")

@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import threading
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -138,9 +138,17 @@ class CatalogStore:
                     search_url TEXT,
                     error TEXT,
                     checked_at TEXT,
+                    retry_after TEXT,
+                    cached INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(run_id, item_id, shop_key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
+                CREATE TABLE IF NOT EXISTS shop_protection_state (
+                    shop_key TEXT PRIMARY KEY REFERENCES monitoring_sources(key),
+                    cooldown_until TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             session_columns = {
@@ -148,6 +156,13 @@ class CatalogStore:
             }
             if "stopped_at" not in session_columns:
                 db.execute("ALTER TABLE monitoring_sessions ADD COLUMN stopped_at TEXT")
+            observation_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(shop_observations)")
+            }
+            if "retry_after" not in observation_columns:
+                db.execute("ALTER TABLE shop_observations ADD COLUMN retry_after TEXT")
+            if "cached" not in observation_columns:
+                db.execute("ALTER TABLE shop_observations ADD COLUMN cached INTEGER NOT NULL DEFAULT 0")
             for order, source in enumerate(SOURCES):
                 db.execute(
                     "INSERT INTO monitoring_sources(key, name, kind, country, base_url, enabled, sort_order) "
@@ -623,16 +638,54 @@ class CatalogStore:
         return self.monitoring_session(row["run_id"]) if row else None
 
     def start_shop_run(
-        self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]
+        self,
+        run_id: str,
+        models: list[dict[str, Any]],
+        shops: list[dict[str, Any]],
+        cache_ttl_seconds: float = 0,
     ) -> None:
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(seconds=max(0, cache_ttl_seconds))).isoformat()
+        now_text = now.isoformat()
         with self._lock, self.connect() as db:
             db.execute("DELETE FROM shop_observations WHERE run_id=?", (run_id,))
             for model in models:
                 for shop in shops:
-                    db.execute(
-                        "INSERT INTO shop_observations(run_id, item_id, shop_key, status) VALUES(?, ?, ?, 'PENDING')",
-                        (run_id, model["id"], shop["key"]),
-                    )
+                    protection = db.execute(
+                        "SELECT cooldown_until, reason FROM shop_protection_state "
+                        "WHERE shop_key=? AND cooldown_until>?",
+                        (shop["key"], now_text),
+                    ).fetchone()
+                    if protection:
+                        db.execute(
+                            "INSERT INTO shop_observations(run_id,item_id,shop_key,status,error,retry_after) "
+                            "VALUES(?,?,?,'COOLDOWN',?,?)",
+                            (run_id, model["id"], shop["key"], protection["reason"], protection["cooldown_until"]),
+                        )
+                        continue
+                    cached = None
+                    if cache_ttl_seconds > 0:
+                        cached = db.execute(
+                            "SELECT title,price_eur,availability,product_url,search_url,checked_at "
+                            "FROM shop_observations WHERE run_id<>? AND item_id=? AND shop_key=? "
+                            "AND status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=? "
+                            "ORDER BY checked_at DESC LIMIT 1",
+                            (run_id, model["id"], shop["key"], cutoff),
+                        ).fetchone()
+                    if cached:
+                        db.execute(
+                            "INSERT INTO shop_observations(run_id,item_id,shop_key,status,title,price_eur,availability,"
+                            "product_url,search_url,checked_at,cached) VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,1)",
+                            (
+                                run_id, model["id"], shop["key"], cached["title"], cached["price_eur"],
+                                cached["availability"], cached["product_url"], cached["search_url"], cached["checked_at"],
+                            ),
+                        )
+                    else:
+                        db.execute(
+                            "INSERT INTO shop_observations(run_id, item_id, shop_key, status) VALUES(?, ?, ?, 'PENDING')",
+                            (run_id, model["id"], shop["key"]),
+                        )
 
     def finish_shop_observation(
         self,
@@ -647,13 +700,15 @@ class CatalogStore:
         product_url: str | None = None,
         search_url: str | None = None,
         error: str | None = None,
+        retry_after: str | None = None,
     ) -> None:
         with self._lock, self.connect() as db:
             db.execute(
                 "UPDATE shop_observations SET status=?, title=?, price_eur=?, availability=?, product_url=?, "
-                "search_url=?, error=?, checked_at=? WHERE run_id=? AND item_id=? AND shop_key=?",
+                "search_url=?, error=?, checked_at=?, retry_after=?, cached=0 "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
                 (
-                    status, title, price_eur, availability, product_url, search_url, error, utc_now(),
+                    status, title, price_eur, availability, product_url, search_url, error, utc_now(), retry_after,
                     run_id, item_id, shop_key,
                 ),
             )
@@ -662,11 +717,41 @@ class CatalogStore:
         with self._lock, self.connect() as db:
             cursor = db.execute(
                 "UPDATE shop_observations SET status='PENDING', title=NULL, price_eur=NULL, availability=NULL, "
-                "product_url=NULL, error=NULL, checked_at=NULL WHERE run_id=? AND item_id=? AND shop_key=?",
+                "product_url=NULL, error=NULL, checked_at=NULL, retry_after=NULL, cached=0 "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
                 (run_id, item_id, shop_key),
             )
             if not cursor.rowcount:
                 raise KeyError((run_id, item_id, shop_key))
+            db.execute("DELETE FROM shop_protection_state WHERE shop_key=?", (shop_key,))
+
+    def shop_observation_pending(self, run_id: str, item_id: int, shop_key: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status FROM shop_observations WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            ).fetchone()
+        return bool(row and row["status"] == "PENDING")
+
+    def pause_shop_for_protection(
+        self, run_id: str, shop_key: str, cooldown_seconds: float, reason: str
+    ) -> str:
+        now = datetime.now(UTC)
+        cooldown_until = (now + timedelta(seconds=max(1, cooldown_seconds))).isoformat()
+        message = str(reason or "Shop protection requested a cooldown")[:500]
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT INTO shop_protection_state(shop_key,cooldown_until,reason,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(shop_key) DO UPDATE SET cooldown_until=excluded.cooldown_until, "
+                "reason=excluded.reason, updated_at=excluded.updated_at",
+                (shop_key, cooldown_until, message, now.isoformat()),
+            )
+            db.execute(
+                "UPDATE shop_observations SET status='COOLDOWN', error=?, retry_after=? "
+                "WHERE run_id=? AND shop_key=? AND status='PENDING'",
+                (message, cooldown_until, run_id, shop_key),
+            )
+        return cooldown_until
 
     def cancel_shop_run(self, run_id: str) -> int:
         """Mark unfinished direct-shop observations as stopped by the user."""
@@ -705,6 +790,8 @@ class CatalogStore:
                 (run_id,),
             ).fetchall()
         results = [dict(row) for row in rows]
+        for result in results:
+            result["cached"] = bool(result.get("cached"))
         pending = sum(1 for row in results if row["status"] == "PENDING")
         return {"status": "RUNNING" if pending else "COMPLETE", "pending": pending, "results": results}
 

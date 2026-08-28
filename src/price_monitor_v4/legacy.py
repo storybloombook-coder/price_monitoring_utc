@@ -95,7 +95,7 @@ class LegacyService:
             "ENABLE_SCHEDULER": "false",
             "ENABLE_LIVE_MARKETPLACES": inherited.get("ENABLE_LIVE_MARKETPLACES", "true"),
             "HTTP_TIMEOUT_SECONDS": inherited.get("HTTP_TIMEOUT_SECONDS", "20"),
-            "GLOBAL_CONCURRENCY": inherited.get("GLOBAL_CONCURRENCY", "3"),
+            "GLOBAL_CONCURRENCY": inherited.get("GLOBAL_CONCURRENCY", "1"),
             "HOST": "127.0.0.1",
             "PORT": str(self.settings.legacy_port),
         }

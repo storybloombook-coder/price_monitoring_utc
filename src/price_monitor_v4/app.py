@@ -38,7 +38,13 @@ def create_app(
     legacy_service = legacy or LegacyService(app_settings)
     browser_bridge = BrowserBridge(float(app_settings.env.get("BROWSER_BRIDGE_TIMEOUT_SECONDS", "150")))
     shop_monitor = ShopMonitor(
-        catalog, float(app_settings.env.get("HTTP_TIMEOUT_SECONDS", "20")), browser_bridge
+        catalog,
+        float(app_settings.env.get("HTTP_TIMEOUT_SECONDS", "20")),
+        browser_bridge,
+        request_delay_min_seconds=float(app_settings.env.get("SHOP_REQUEST_DELAY_MIN_SECONDS", "8")),
+        request_delay_max_seconds=float(app_settings.env.get("SHOP_REQUEST_DELAY_MAX_SECONDS", "15")),
+        cooldown_seconds=float(app_settings.env.get("SHOP_COOLDOWN_SECONDS", "3600")),
+        cache_ttl_seconds=float(app_settings.env.get("SHOP_CACHE_TTL_SECONDS", "14400")),
     )
 
     @asynccontextmanager
@@ -97,6 +103,13 @@ def create_app(
             "source_workbook": str(app_settings.active_workbook),
             "legacy_service": "running" if legacy_service.running else ("disabled" if not app_settings.legacy_enabled else "stopped"),
             "browser_bridge": browser_bridge.status(),
+            "polite_monitoring": {
+                "enabled": True,
+                "per_shop_concurrency": 1,
+                "delay_seconds": [shop_monitor.request_delay_min_seconds, shop_monitor.request_delay_max_seconds],
+                "cooldown_seconds": shop_monitor.cooldown_seconds,
+                "cache_ttl_seconds": shop_monitor.cache_ttl_seconds,
+            },
             "catalog": catalog.stats(),
         }
 

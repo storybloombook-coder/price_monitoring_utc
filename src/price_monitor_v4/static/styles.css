@@ -102,6 +102,8 @@ input[type="search"], input[type="text"], input[type="number"], input[type="url"
 .detail-offer { display: grid; gap: 2px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 11px; }
 .detail-offer:first-of-type { border-top: 0; }
 .detail-error { color: var(--danger); max-width: 240px; white-space: normal; }
+.cache-note { color: var(--blue); }
+.cooldown-note { color: var(--warn); font-weight: 700; }
 .result-row-filtered { display: none; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 12.5px; }
@@ -122,7 +124,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .stock-row-monitored:hover { background: color-mix(in srgb, var(--brand) 11%, transparent); }
 .badge { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 800; white-space: nowrap; background: var(--surface-2); border: 1px solid var(--line); }
 .badge.active, .badge.success, .badge.monitoring { color: var(--brand); }
-.badge.paused, .badge.incomplete, .badge.action-required { color: var(--warn); }
+.badge.paused, .badge.incomplete, .badge.action-required, .badge.cooldown { color: var(--warn); }
+.badge.cached { color: var(--blue); }
 .badge.trash, .badge.failed { color: var(--danger); }
 .badge.unmatched, .badge.not-found { color: var(--muted); }
 .status-counts { display: inline-flex; flex-wrap: wrap; gap: 4px; }
@@ -130,6 +133,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .marketplaces { justify-content: flex-end; }
 .source-settings { display: grid; grid-template-columns: .8fr 1.2fr; gap: 14px; margin: 4px 0 18px; }
 .browser-bridge-state { display: flex; align-items: center; gap: 8px; margin: -6px 0 14px; color: var(--muted); font-size: 12px; }
+.polite-mode-state { margin: -7px 0 14px 17px; color: var(--brand); font-size: 11px; font-weight: 700; }
 .bridge-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 14%, transparent); }
 .browser-bridge-state.connected { color: var(--brand); }
 .browser-bridge-state.connected .bridge-dot { background: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 14%, transparent); }

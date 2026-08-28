@@ -35,9 +35,13 @@ Both lists support manual creation, editing, search, pause/resume, soft deletion
 
 Marketplaces and shops have individual switches plus master switches for each group. Shops are grouped by Lithuania, Latvia, and Estonia. A model can use automatic shop search or an optional direct product URL saved in its editor.
 
-The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Every column can be hidden from its header and restored from the **Columns** menu; column visibility is retained in the browser.
+The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Columns can be shown or hidden from the **Columns** menu; column visibility is retained in the browser. Use **Hard stop** to cancel a stuck run while preserving completed results.
 
 If the Edge extension is connected, protected pages are automatically delegated to a visible normal-browser tab. Without the extension, or when a human verification times out, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually.
+
+### Polite monitoring
+
+Direct-shop collection uses one sequential request stream per retailer with an 8–15 second delay. Fresh successful observations are reused for four hours and clearly marked **Cached**. A `429`, Cloudflare challenge, or blocked browser verification pauses the retailer for at least one hour (or the server's `Retry-After` value); remaining checks are marked **Cooldown** with the next retry time. Other retailer domains can continue independently. Marketplace concurrency defaults to one.
 
 ## Configuration
 
