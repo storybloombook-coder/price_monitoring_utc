@@ -61,6 +61,7 @@ try {
         --hidden-import uvicorn.protocols.http.auto `
         --hidden-import uvicorn.protocols.websockets.auto `
         --hidden-import uvicorn.lifespan.on `
+        --collect-all playwright `
         --distpath $pmPyInstallerDist `
         --workpath $pmPyInstallerWork `
         --specpath $pmBuildRoot `
@@ -68,7 +69,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
 
     New-Item -ItemType Directory -Path $pmPortableRoot -Force | Out-Null
-    foreach ($pmBuildAsset in @('PriceMonitor.exe', '_internal', 'legacy', 'edge-extension', 'README.md', '.env.example')) {
+    foreach ($pmBuildAsset in @('PriceMonitor.exe', '_internal', 'legacy', 'README.md', '.env.example')) {
         $pmAssetPath = Join-Path $pmPortableRoot $pmBuildAsset
         if (Test-Path -LiteralPath $pmAssetPath) {
             Remove-Item -LiteralPath $pmAssetPath -Recurse -Force
@@ -83,7 +84,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $pmRoot '_internal') -Destination (Join-Path $pmLegacyRoot '_internal') -Recurse
     Copy-Item -LiteralPath (Join-Path $pmRoot 'README.md') -Destination $pmPortableRoot
     Copy-Item -LiteralPath (Join-Path $pmRoot '.env.example') -Destination $pmPortableRoot
-    Copy-Item -LiteralPath (Join-Path $pmRoot 'edge-extension') -Destination (Join-Path $pmPortableRoot 'edge-extension') -Recurse
+    $pmExtensionRoot = Join-Path $pmPortableRoot 'edge-extension'
+    New-Item -ItemType Directory -Path $pmExtensionRoot -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $pmRoot 'edge-extension') -Force |
+        Copy-Item -Destination $pmExtensionRoot -Recurse -Force
 
     $pmResult = [ordered]@{
         Executable = Join-Path $pmPortableRoot 'PriceMonitor.exe'

@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from html.parser import HTMLParser
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -17,6 +18,13 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
+
+try:
+    from playwright.async_api import BrowserContext, Playwright, async_playwright
+except ImportError:  # The source tree remains usable before optional browser dependencies are installed.
+    BrowserContext = Any
+    Playwright = Any
+    async_playwright = None
 
 from .browser_bridge import BrowserBridge, BrowserBridgeTimeout, BrowserBridgeUnavailable
 from .catalog import CatalogStore, canonicalize
@@ -32,6 +40,18 @@ class ActionRequiredError(ValueError):
     def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+
+
+class ProtectionBlockedError(ActionRequiredError):
+    """A retailer protection page blocked this collection path."""
+
+
+class RenderRequiredError(ValueError):
+    """The direct response needs a JavaScript-capable browser."""
+
+
+class CollectionMethodUnavailable(ValueError):
+    """The selected collection method cannot run on this computer."""
 
 
 def retry_after_seconds(value: str | None, default: float) -> float:
@@ -313,6 +333,64 @@ class EdgeRenderer:
         shutil.rmtree(self.profile, ignore_errors=True)
 
 
+class PlaywrightRenderer:
+    """Persistent Edge profile used by the selectable Playwright strategy."""
+
+    def __init__(self, profile: Path, timeout_seconds: float) -> None:
+        self.profile = profile
+        self.timeout_seconds = timeout_seconds
+        self.playwright: Playwright | None = None
+        self.context: BrowserContext | None = None
+
+    async def start(self) -> bool:
+        if self.context:
+            return True
+        if async_playwright is None or not edge_executable():
+            return False
+        self.profile.mkdir(parents=True, exist_ok=True)
+        try:
+            self.playwright = await async_playwright().start()
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                str(self.profile),
+                channel="msedge",
+                headless=True,
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+                args=["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"],
+            )
+            return True
+        except Exception:
+            if self.playwright:
+                await self.playwright.stop()
+            self.playwright = None
+            self.context = None
+            return False
+
+    async def fetch(self, url: str) -> tuple[str, str] | None:
+        if not await self.start() or not self.context:
+            return None
+        page = await self.context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=int(self.timeout_seconds * 1000))
+            try:
+                await page.wait_for_load_state("networkidle", timeout=min(8000, int(self.timeout_seconds * 1000)))
+            except Exception:
+                pass
+            return await page.content(), page.url
+        except Exception:
+            return None
+        finally:
+            await page.close()
+
+    async def close(self) -> None:
+        if self.context:
+            await self.context.close()
+        if self.playwright:
+            await self.playwright.stop()
+        self.context = None
+        self.playwright = None
+
+
 async def fetch_rendered_html(url: str, timeout_seconds: float) -> str | None:
     renderer = EdgeRenderer(timeout_seconds)
     try:
@@ -357,6 +435,8 @@ class ShopMonitor:
 
     async def _run(self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]) -> None:
         renderer = EdgeRenderer(self.timeout_seconds)
+        database = Path(getattr(self.store, "database", Path(tempfile.gettempdir()) / "price-monitor.sqlite3"))
+        playwright_renderer = PlaywrightRenderer(database.parent / "playwright-edge-profile", self.timeout_seconds)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -372,29 +452,65 @@ class ShopMonitor:
                 for model in ordered_models:
                     if not self.store.shop_observation_pending(run_id, model["id"], shop["key"]):
                         continue
-                    if sent_request:
+                    if sent_request and shop.get("collection_method") != "manual":
                         await asyncio.sleep(random.uniform(
                             self.request_delay_min_seconds, self.request_delay_max_seconds
                         ))
-                    await self._check_one(client, renderer, run_id, model, shop)
+                    await self._check_one(client, renderer, run_id, model, shop, playwright_renderer)
                     sent_request = True
             try:
                 # Shops may progress independently, but a single domain is always sequential.
                 await asyncio.gather(*(one_shop(shop) for shop in shops))
             finally:
                 await renderer.close()
+                await playwright_renderer.close()
         self._tasks.pop(run_id, None)
 
     async def _check_one(
-        self, client: httpx.AsyncClient, renderer: EdgeRenderer, run_id: str, model: dict[str, Any], shop: dict[str, Any]
+        self,
+        client: httpx.AsyncClient,
+        renderer: EdgeRenderer,
+        run_id: str,
+        model: dict[str, Any],
+        shop: dict[str, Any],
+        playwright_renderer: PlaywrightRenderer | None = None,
+        method_override: str | None = None,
     ) -> None:
+        attempts: list[dict[str, Any]] = []
+        selected_method = method_override or str(shop.get("collection_method") or "auto")
+        used_method: str | None = None
         source = SOURCE_BY_KEY[shop["key"]]
         manual_url = (model.get("shop_links") or {}).get(shop["key"])
         search_url = source.search_url(model["model"])
         target_url = manual_url or search_url
         if not target_url:
-            self.store.finish_shop_observation(run_id, model["id"], shop["key"], "NOT_FOUND", search_url=search_url)
+            self.store.finish_shop_observation(
+                run_id, model["id"], shop["key"], "NOT_FOUND", search_url=search_url,
+                collection_method=selected_method, attempts=attempts,
+            )
             return
+
+        async def attempted(method: str, operation) -> tuple[str, str]:
+            nonlocal used_method
+            started = time.monotonic()
+            try:
+                result = await operation()
+                attempts.append({
+                    "method": method,
+                    "result": "SUCCESS",
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                })
+                used_method = method
+                return result
+            except Exception as error:
+                attempts.append({
+                    "method": method,
+                    "result": "BLOCKED" if isinstance(error, ActionRequiredError) else "FAILED",
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                    "error": str(error)[:300],
+                })
+                raise
+
         try:
             async def fetch_from_extension(url: str) -> tuple[str, str]:
                 if not self.browser_bridge or not self.browser_bridge.connected:
@@ -412,51 +528,91 @@ class ShopMonitor:
                 rendered = str(capture.get("html") or "")
                 if capture.get("security_challenge") or capture.get("incomplete") or not rendered or security_challenge(rendered):
                     self._extension_blocked.add(shop["key"])
-                    raise ActionRequiredError(
+                    raise ProtectionBlockedError(
                         "Complete the visible security verification in Edge, then start monitoring again"
                     )
                 return rendered, str(capture.get("url") or url)
 
             async def fetch_from_local_edge(url: str) -> tuple[str, str]:
-                if shop["key"] not in {"senukai", "varle"}:
-                    raise ActionRequiredError(
-                        "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
-                    )
                 async with self._browser_semaphore:
                     if shop["key"] in self._browser_blocked:
-                        raise ActionRequiredError(
-                            "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
-                        )
+                        raise ProtectionBlockedError("Background Edge was already blocked for this shop during this run")
                     rendered = await renderer.fetch(url)
                     if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
                         self._browser_blocked.add(shop["key"])
-                        raise ActionRequiredError(
-                            "Open the shop link in your normal browser and verify this price manually; automated access was blocked"
-                        )
+                        raise ProtectionBlockedError("Background Edge was blocked or could not render the retailer page")
                 return rendered, url
 
+            async def fetch_from_playwright(url: str) -> tuple[str, str]:
+                if not playwright_renderer:
+                    raise CollectionMethodUnavailable("Playwright Edge is unavailable")
+                async with self._browser_semaphore:
+                    rendered = await playwright_renderer.fetch(url)
+                if not rendered:
+                    raise CollectionMethodUnavailable("Playwright Edge could not open the retailer page")
+                html, resolved = rendered
+                if security_challenge(html) or incomplete_catalog_render(html):
+                    raise ProtectionBlockedError("Playwright Edge was blocked or could not render the retailer page")
+                return html, resolved
+
+            async def fetch_direct(url: str) -> tuple[str, str]:
+                response = await client.get(url)
+                if response.status_code == 429:
+                    delay = retry_after_seconds(response.headers.get("retry-after"), self.cooldown_seconds)
+                    raise ProtectionBlockedError(
+                        "The shop rate-limited this IP. Requests are paused to avoid a longer block.", delay
+                    )
+                if response.status_code == 403:
+                    raise ProtectionBlockedError("The direct request was rejected by retailer protection")
+                response.raise_for_status()
+                html = response.text
+                if response.headers.get("cf-mitigated", "").lower() == "challenge" or security_challenge(html):
+                    raise ProtectionBlockedError("The direct request reached a retailer security challenge")
+                if incomplete_catalog_render(html):
+                    raise RenderRequiredError("The retailer page requires JavaScript rendering")
+                return html, str(response.url)
+
+            methods = {
+                "direct": fetch_direct,
+                "background": fetch_from_local_edge,
+                "playwright": fetch_from_playwright,
+                "extension": fetch_from_extension,
+            }
+
             async def fetch(url: str) -> tuple[str, str]:
+                if selected_method == "manual":
+                    raise ActionRequiredError("Manual collection is selected; open the retailer link and verify the price")
+                if selected_method != "auto":
+                    operation = methods.get(selected_method)
+                    if not operation:
+                        raise CollectionMethodUnavailable(f"Unknown collection method: {selected_method}")
+                    return await attempted(selected_method, lambda: operation(url))
+
                 try:
-                    response = await client.get(url)
-                    if response.status_code == 429:
-                        delay = retry_after_seconds(response.headers.get("retry-after"), self.cooldown_seconds)
-                        raise ActionRequiredError(
-                            "The shop rate-limited this IP. Requests are paused to avoid a longer block.", delay
-                        )
-                    response.raise_for_status()
-                    html = response.text
-                    challenged = response.headers.get("cf-mitigated", "").lower() == "challenge"
-                    if challenged or security_challenge(html) or incomplete_catalog_render(html):
-                        if self.browser_bridge and self.browser_bridge.connected:
-                            return await fetch_from_extension(str(response.url))
-                        return await fetch_from_local_edge(str(response.url))
-                    return html, str(response.url)
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code != 403:
+                    return await attempted("direct", lambda: fetch_direct(url))
+                except ProtectionBlockedError as direct_error:
+                    if direct_error.retry_after_seconds:
                         raise
                     if self.browser_bridge and self.browser_bridge.connected:
-                        return await fetch_from_extension(url)
-                    return await fetch_from_local_edge(url)
+                        return await attempted("extension", lambda: fetch_from_extension(url))
+                    raise ActionRequiredError(
+                        "Retailer protection blocked direct collection and the Edge extension is not connected"
+                    ) from direct_error
+                except (RenderRequiredError, httpx.HTTPError, CollectionMethodUnavailable):
+                    preferred = str(shop.get("last_success_method") or "")
+                    browser_order = [preferred] if preferred in {"playwright", "background"} else []
+                    browser_order.extend(method for method in ("playwright", "background") if method not in browser_order)
+                    last_error: Exception | None = None
+                    for method in browser_order:
+                        try:
+                            return await attempted(method, lambda method=method: methods[method](url))
+                        except (ProtectionBlockedError, CollectionMethodUnavailable, OSError) as error:
+                            last_error = error
+                    if self.browser_bridge and self.browser_bridge.connected:
+                        return await attempted("extension", lambda: fetch_from_extension(url))
+                    raise ActionRequiredError(
+                        "Browser rendering did not complete and the Edge extension is not connected"
+                    ) from last_error
 
             html, resolved_url = await fetch(target_url)
             product_url = target_url
@@ -469,29 +625,37 @@ class ShopMonitor:
                     product_html, product_resolved_url = await fetch(product_url)
                     parsed = parse_product(product_html, product_resolved_url, model["model"])
             if parsed:
+                if hasattr(self.store, "remember_source_method"):
+                    self.store.remember_source_method(shop["key"], used_method or selected_method)
                 self.store.finish_shop_observation(
-                    run_id, model["id"], shop["key"], "SUCCESS", search_url=search_url, **parsed
+                    run_id, model["id"], shop["key"], "SUCCESS", search_url=search_url,
+                    collection_method=used_method or selected_method, attempts=attempts, **parsed
                 )
             else:
                 self.store.finish_shop_observation(
                     run_id, model["id"], shop["key"], "NOT_FOUND", product_url=product_url or None,
-                    search_url=search_url, error="No matching product price was found"
+                    search_url=search_url, error="No matching product price was found",
+                    collection_method=used_method or selected_method, attempts=attempts,
                 )
         except ActionRequiredError as error:
-            cooldown_until = self.store.pause_shop_for_protection(
-                run_id,
-                shop["key"],
-                error.retry_after_seconds or self.cooldown_seconds,
-                str(error),
-            )
+            cooldown_until = None
+            if selected_method != "manual":
+                cooldown_until = self.store.pause_shop_for_protection(
+                    run_id,
+                    shop["key"],
+                    error.retry_after_seconds or self.cooldown_seconds,
+                    str(error),
+                )
             self.store.finish_shop_observation(
                 run_id, model["id"], shop["key"], "ACTION_REQUIRED", product_url=manual_url,
                 search_url=search_url, error=str(error)[:500], retry_after=cooldown_until,
+                collection_method=used_method or selected_method, attempts=attempts,
             )
         except (httpx.HTTPError, ValueError, OSError) as error:
             self.store.finish_shop_observation(
                 run_id, model["id"], shop["key"], "FAILED", product_url=manual_url,
-                search_url=search_url, error=str(error)[:500]
+                search_url=search_url, error=str(error)[:500],
+                collection_method=used_method or selected_method, attempts=attempts,
             )
 
     def retry(self, run_id: str, item_id: int, shop_key: str) -> None:
@@ -511,6 +675,8 @@ class ShopMonitor:
 
         async def run_retry() -> None:
             renderer = EdgeRenderer(self.timeout_seconds)
+            database = Path(getattr(self.store, "database", Path(tempfile.gettempdir()) / "price-monitor.sqlite3"))
+            playwright_renderer = PlaywrightRenderer(database.parent / "playwright-edge-profile", self.timeout_seconds)
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -520,12 +686,79 @@ class ShopMonitor:
                 async with httpx.AsyncClient(
                     timeout=self.timeout_seconds, follow_redirects=True, headers=headers
                 ) as client:
-                    await self._check_one(client, renderer, run_id, model, shop)
+                    await self._check_one(client, renderer, run_id, model, shop, playwright_renderer)
             finally:
                 await renderer.close()
+                await playwright_renderer.close()
                 self._tasks.pop(task_key, None)
 
         self._tasks[task_key] = asyncio.create_task(run_retry())
+
+    async def test_method(self, item_id: int, shop_key: str, method: str) -> dict[str, Any]:
+        """Run one isolated SKU/method diagnostic without changing monitoring history."""
+        allowed = {"auto", "direct", "background", "playwright", "extension", "manual"}
+        if method not in allowed:
+            raise ValueError(f"Unsupported shop collection method: {method}")
+        model = self.store.get_item(item_id)
+        shop = next(
+            (item for item in self.store.list_sources() if item["key"] == shop_key and item["kind"] == "shop"),
+            None,
+        )
+        if model["kind"] != "source" or not shop:
+            raise KeyError((item_id, shop_key))
+
+        class ProbeStore:
+            def __init__(self, database: Path) -> None:
+                self.database = database
+                self.result: dict[str, Any] = {}
+
+            def finish_shop_observation(self, _run_id, _item_id, _shop_key, status, **kwargs) -> None:
+                self.result = {"status": status, **kwargs}
+
+            def pause_shop_for_protection(self, _run_id, _shop_key, cooldown_seconds, reason) -> str:
+                self.result["protection"] = {"cooldown_seconds": cooldown_seconds, "reason": reason}
+                return datetime.now(UTC).isoformat()
+
+            def remember_source_method(self, _key, _method) -> None:
+                return None
+
+        probe_store = ProbeStore(Path(getattr(self.store, "database")))
+        probe = ShopMonitor(
+            probe_store,
+            self.timeout_seconds,
+            self.browser_bridge,
+            request_delay_min_seconds=0,
+            request_delay_max_seconds=0,
+            cooldown_seconds=self.cooldown_seconds,
+            cache_ttl_seconds=0,
+        )
+        renderer = EdgeRenderer(self.timeout_seconds)
+        playwright_renderer = PlaywrightRenderer(
+            probe_store.database.parent / "playwright-edge-profile", self.timeout_seconds
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,lt;q=0.8,et;q=0.7",
+        }
+        started = time.monotonic()
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds, follow_redirects=True, headers=headers
+            ) as client:
+                await probe._check_one(
+                    client, renderer, "method-test", model, shop, playwright_renderer, method_override=method
+                )
+        finally:
+            await renderer.close()
+            await playwright_renderer.close()
+        return {
+            "shop_key": shop_key,
+            "model": model["model"],
+            "requested_method": method,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            **probe_store.result,
+        }
 
     async def cancel_run(self, run_id: str) -> int:
         task_keys = [

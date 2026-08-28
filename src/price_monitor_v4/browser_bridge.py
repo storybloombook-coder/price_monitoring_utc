@@ -40,19 +40,29 @@ class CaptureJob:
 class BrowserBridge:
     """In-memory queue connecting shop checks to the local Edge extension."""
 
-    def __init__(self, timeout_seconds: float = 150, connected_window_seconds: float = 60) -> None:
+    def __init__(self, timeout_seconds: float = 150, connected_window_seconds: float = 180) -> None:
         self.timeout_seconds = timeout_seconds
         self.connected_window_seconds = connected_window_seconds
         self._last_seen = 0.0
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._jobs: dict[str, CaptureJob] = {}
+        self._websocket_connections = 0
 
     @property
     def connected(self) -> bool:
-        return self._last_seen > 0 and time.monotonic() - self._last_seen <= self.connected_window_seconds
+        return self._websocket_connections > 0 or (
+            self._last_seen > 0 and time.monotonic() - self._last_seen <= self.connected_window_seconds
+        )
 
     def heartbeat(self) -> None:
         self._last_seen = time.monotonic()
+
+    def websocket_connected(self) -> None:
+        self._websocket_connections += 1
+        self.heartbeat()
+
+    def websocket_disconnected(self) -> None:
+        self._websocket_connections = max(0, self._websocket_connections - 1)
 
     def status(self) -> dict[str, Any]:
         age = time.monotonic() - self._last_seen if self._last_seen else None
@@ -60,6 +70,7 @@ class BrowserBridge:
             "connected": self.connected,
             "last_seen_seconds": round(age, 1) if age is not None else None,
             "pending_jobs": len(self._jobs),
+            "transport": "websocket" if self._websocket_connections else ("polling" if self.connected else "offline"),
             "jobs": [job.public() for job in self._jobs.values()],
             "extension_id": EXTENSION_ID,
         }
@@ -113,3 +124,4 @@ class BrowserBridge:
             if not job.future.done():
                 job.future.cancel()
         self._jobs.clear()
+        self._websocket_connections = 0

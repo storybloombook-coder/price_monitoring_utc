@@ -105,6 +105,17 @@
     <div id="action-items" class="action-items"></div>
     <div class="dialog-actions"><button id="action-later" type="button" class="secondary">Later</button></div>
   </dialog>
+  <dialog id="method-test-dialog" class="method-test-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">SAFE DIAGNOSTIC</p><h2 id="method-test-title">Test collection method</h2></div><button id="method-test-close" type="button" class="icon-button" aria-label="Close">×</button></div>
+    <p class="muted">Runs one method for one model. It does not start a full monitoring run or automatically try every method.</p>
+    <input id="method-test-shop" type="hidden">
+    <div class="form-grid method-test-form">
+      <label>Monitoring model<select id="method-test-item"></select></label>
+      <label>Collection method<select id="method-test-method"></select></label>
+    </div>
+    <div id="method-test-result" class="method-test-result muted">Choose a model and run the diagnostic.</div>
+    <div class="dialog-actions"><button id="method-test-cancel" type="button" class="secondary">Close</button><button id="method-test-run" type="button">Run one test</button></div>
+  </dialog>
   <script src="/assets/app.js" defer></script>
 </body>
 </html>

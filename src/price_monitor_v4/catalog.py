@@ -110,6 +110,8 @@ class CatalogStore:
                     country TEXT NOT NULL,
                     base_url TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    collection_method TEXT NOT NULL DEFAULT 'auto',
+                    last_success_method TEXT,
                     sort_order INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS item_shop_links (
@@ -140,6 +142,8 @@ class CatalogStore:
                     checked_at TEXT,
                     retry_after TEXT,
                     cached INTEGER NOT NULL DEFAULT 0,
+                    collection_method TEXT,
+                    attempts_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY(run_id, item_id, shop_key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
@@ -163,6 +167,17 @@ class CatalogStore:
                 db.execute("ALTER TABLE shop_observations ADD COLUMN retry_after TEXT")
             if "cached" not in observation_columns:
                 db.execute("ALTER TABLE shop_observations ADD COLUMN cached INTEGER NOT NULL DEFAULT 0")
+            if "collection_method" not in observation_columns:
+                db.execute("ALTER TABLE shop_observations ADD COLUMN collection_method TEXT")
+            if "attempts_json" not in observation_columns:
+                db.execute("ALTER TABLE shop_observations ADD COLUMN attempts_json TEXT NOT NULL DEFAULT '[]'")
+            source_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(monitoring_sources)")
+            }
+            if "collection_method" not in source_columns:
+                db.execute("ALTER TABLE monitoring_sources ADD COLUMN collection_method TEXT NOT NULL DEFAULT 'auto'")
+            if "last_success_method" not in source_columns:
+                db.execute("ALTER TABLE monitoring_sources ADD COLUMN last_success_method TEXT")
             for order, source in enumerate(SOURCES):
                 db.execute(
                     "INSERT INTO monitoring_sources(key, name, kind, country, base_url, enabled, sort_order) "
@@ -589,12 +604,40 @@ class CatalogStore:
             result.append(item)
         return result
 
-    def update_source(self, key: str, enabled: bool) -> dict[str, Any]:
+    def update_source(
+        self,
+        key: str,
+        enabled: bool | None = None,
+        collection_method: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock, self.connect() as db:
-            cursor = db.execute("UPDATE monitoring_sources SET enabled=? WHERE key=?", (int(enabled), key))
-            if not cursor.rowcount:
+            source = db.execute("SELECT kind FROM monitoring_sources WHERE key=?", (key,)).fetchone()
+            if not source:
                 raise KeyError(key)
+            if collection_method is not None:
+                allowed = (
+                    {"auto", "legacy"}
+                    if source["kind"] == "marketplace"
+                    else {"auto", "direct", "background", "playwright", "extension", "manual"}
+                )
+                if collection_method not in allowed:
+                    raise ValueError(f"Unsupported {source['kind']} collection method: {collection_method}")
+                db.execute(
+                    "UPDATE monitoring_sources SET collection_method=? WHERE key=?",
+                    (collection_method, key),
+                )
+            if enabled is not None:
+                db.execute("UPDATE monitoring_sources SET enabled=? WHERE key=?", (int(enabled), key))
         return next(item for item in self.list_sources() if item["key"] == key)
+
+    def remember_source_method(self, key: str, collection_method: str) -> None:
+        if collection_method not in {"direct", "background", "playwright", "extension"}:
+            return
+        with self._lock, self.connect() as db:
+            db.execute(
+                "UPDATE monitoring_sources SET last_success_method=? WHERE key=?",
+                (collection_method, key),
+            )
 
     def update_source_master(self, kind: str, enabled: bool) -> dict[str, Any]:
         if kind not in {"marketplace", "shop"}:
@@ -666,7 +709,8 @@ class CatalogStore:
                     cached = None
                     if cache_ttl_seconds > 0:
                         cached = db.execute(
-                            "SELECT title,price_eur,availability,product_url,search_url,checked_at "
+                            "SELECT title,price_eur,availability,product_url,search_url,checked_at,"
+                            "collection_method,attempts_json "
                             "FROM shop_observations WHERE run_id<>? AND item_id=? AND shop_key=? "
                             "AND status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=? "
                             "ORDER BY checked_at DESC LIMIT 1",
@@ -675,10 +719,12 @@ class CatalogStore:
                     if cached:
                         db.execute(
                             "INSERT INTO shop_observations(run_id,item_id,shop_key,status,title,price_eur,availability,"
-                            "product_url,search_url,checked_at,cached) VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,1)",
+                            "product_url,search_url,checked_at,collection_method,attempts_json,cached) "
+                            "VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,?,?,1)",
                             (
                                 run_id, model["id"], shop["key"], cached["title"], cached["price_eur"],
                                 cached["availability"], cached["product_url"], cached["search_url"], cached["checked_at"],
+                                cached["collection_method"], cached["attempts_json"] or "[]",
                             ),
                         )
                     else:
@@ -701,14 +747,17 @@ class CatalogStore:
         search_url: str | None = None,
         error: str | None = None,
         retry_after: str | None = None,
+        collection_method: str | None = None,
+        attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._lock, self.connect() as db:
             db.execute(
                 "UPDATE shop_observations SET status=?, title=?, price_eur=?, availability=?, product_url=?, "
-                "search_url=?, error=?, checked_at=?, retry_after=?, cached=0 "
+                "search_url=?, error=?, checked_at=?, retry_after=?, collection_method=?, attempts_json=?, cached=0 "
                 "WHERE run_id=? AND item_id=? AND shop_key=?",
                 (
                     status, title, price_eur, availability, product_url, search_url, error, utc_now(), retry_after,
+                    collection_method, json.dumps(attempts or [], ensure_ascii=False),
                     run_id, item_id, shop_key,
                 ),
             )
@@ -717,7 +766,8 @@ class CatalogStore:
         with self._lock, self.connect() as db:
             cursor = db.execute(
                 "UPDATE shop_observations SET status='PENDING', title=NULL, price_eur=NULL, availability=NULL, "
-                "product_url=NULL, error=NULL, checked_at=NULL, retry_after=NULL, cached=0 "
+                "product_url=NULL, error=NULL, checked_at=NULL, retry_after=NULL, collection_method=NULL, "
+                "attempts_json='[]', cached=0 "
                 "WHERE run_id=? AND item_id=? AND shop_key=?",
                 (run_id, item_id, shop_key),
             )
@@ -792,6 +842,7 @@ class CatalogStore:
         results = [dict(row) for row in rows]
         for result in results:
             result["cached"] = bool(result.get("cached"))
+            result["attempts"] = json.loads(result.pop("attempts_json", "[]") or "[]")
         pending = sum(1 for row in results if row["status"] == "PENDING")
         return {"status": "RUNNING" if pending else "COMPLETE", "pending": pending, "results": results}
 

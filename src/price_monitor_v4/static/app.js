@@ -1,5 +1,10 @@
 const byId = id => document.getElementById(id);
 const HIDDEN_COLUMNS_KEY = 'price-monitor-v4.hidden-columns';
+const SHOP_METHODS = [
+  ['auto', 'Auto · gentle fallback'], ['direct', 'Direct request'], ['background', 'Background Edge'],
+  ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual only']
+];
+const MARKETPLACE_METHODS = [['auto', 'Auto'], ['legacy', 'Legacy engine']];
 const state = {
   source: [], sourceOptions: [], stock: [], summary: null, sources: [], tasks: [], shopResults: [], runPoll: null,
   catalogStates: { source: new Set(['active', 'paused']), stock: new Set(['active', 'paused']) },
@@ -103,8 +108,12 @@ async function loadCatalog() {
 }
 
 function sourceSwitch(item) {
-  return `<div class="source-item ${item.master_enabled ? '' : 'master-disabled'}"><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>
-    <label class="switch-row" aria-label="Enable ${escapeHtml(item.name)}"><input type="checkbox" data-source-key="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''} ${item.master_enabled ? '' : 'disabled'}><span class="switch"></span></label></div>`;
+  const methods = item.kind === 'shop' ? SHOP_METHODS : MARKETPLACE_METHODS;
+  const options = methods.map(([value, label]) => `<option value="${value}" ${item.collection_method === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+  const learned = item.last_success_method ? `<span class="learned-method">Last success: ${escapeHtml(item.last_success_method)}</span>` : '';
+  return `<div class="source-item ${item.master_enabled ? '' : 'master-disabled'}"><div class="source-identity"><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>${learned}</div>
+    <div class="source-controls"><select class="method-select" data-source-method="${escapeHtml(item.key)}" aria-label="Collection method for ${escapeHtml(item.name)}">${options}</select>${item.kind === 'shop' ? `<button type="button" class="compact secondary" data-test-source="${escapeHtml(item.key)}">Test</button>` : ''}
+    <label class="switch-row" aria-label="Enable ${escapeHtml(item.name)}"><input type="checkbox" data-source-key="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''} ${item.master_enabled ? '' : 'disabled'}><span class="switch"></span></label></div></div>`;
 }
 
 function renderSources() {
@@ -120,6 +129,8 @@ function renderSources() {
   }).join('');
   byId('shop-link-inputs').innerHTML = shops.map(item => `<label>${escapeHtml(item.name)}<input data-shop-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
   document.querySelectorAll('[data-source-key]').forEach(input => input.addEventListener('change', () => updateSource(input.dataset.sourceKey, input.checked)));
+  document.querySelectorAll('[data-source-method]').forEach(select => select.addEventListener('change', () => updateSourceMethod(select.dataset.sourceMethod, select.value)));
+  document.querySelectorAll('[data-test-source]').forEach(button => button.addEventListener('click', () => openMethodTest(button.dataset.testSource)));
 }
 
 async function loadSources() { state.sources = await api('/sources'); renderSources(); if (state.tasks.length || state.shopResults.length) renderResults(); }
@@ -131,7 +142,8 @@ async function loadBrowserBridge() {
     root.classList.toggle('connected', bridge.connected);
     const current = bridge.jobs?.[0];
     const detail = current ? ` · checking ${current.shop_key} for ${current.model}` : '';
-    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${detail}` : 'Edge extension not connected · protected shops will require manual verification'}</span>`;
+    const transport = bridge.transport === 'websocket' ? ' · live channel' : bridge.transport === 'polling' ? ' · recovery polling' : '';
+    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${transport}${detail}` : 'Edge extension not connected · protected shops will require manual verification'}</span>`;
   } catch {
     root.classList.remove('connected');
     root.innerHTML = '<span class="bridge-dot"></span><span>Edge extension status unavailable</span>';
@@ -140,6 +152,46 @@ async function loadBrowserBridge() {
 async function updateSource(key, enabled) {
   try { await api(`/sources/${encodeURIComponent(key)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }); await loadSources(); }
   catch (error) { showBanner('error', error.message); await loadSources(); }
+}
+async function updateSourceMethod(key, collectionMethod) {
+  try {
+    await api(`/sources/${encodeURIComponent(key)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ collection_method: collectionMethod }) });
+    await loadSources(); showBanner('success', 'Collection method updated.');
+  } catch (error) { showBanner('error', error.message); await loadSources(); }
+}
+
+function openMethodTest(shopKey) {
+  const shop = state.sources.find(item => item.key === shopKey);
+  const models = state.sourceOptions.filter(item => item.state !== 'trash' && !item.paused);
+  byId('method-test-shop').value = shopKey;
+  byId('method-test-title').textContent = `Test ${shop?.name || shopKey}`;
+  byId('method-test-item').innerHTML = models.map(item => `<option value="${item.id}">${escapeHtml(item.model)}</option>`).join('');
+  byId('method-test-method').innerHTML = SHOP_METHODS.map(([value, label]) => `<option value="${value}" ${value === (shop?.collection_method || 'auto') ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+  byId('method-test-result').className = 'method-test-result muted';
+  byId('method-test-result').textContent = models.length ? 'Ready to run one isolated request path.' : 'Add an active monitoring model first.';
+  byId('method-test-run').disabled = !models.length;
+  byId('method-test-dialog').showModal();
+}
+
+async function runMethodTest() {
+  const button = byId('method-test-run');
+  const shopKey = byId('method-test-shop').value;
+  button.disabled = true; button.textContent = 'Testing…';
+  byId('method-test-result').className = 'method-test-result muted';
+  byId('method-test-result').textContent = 'Opening one collection path. This can take up to the configured browser timeout.';
+  try {
+    const result = await api(`/sources/${encodeURIComponent(shopKey)}/test`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ item_id: Number(byId('method-test-item').value), method: byId('method-test-method').value })
+    });
+    const attempts = (result.attempts || []).map(attempt => `<li><strong>${escapeHtml(attempt.method)}</strong> · ${escapeHtml(attempt.result)} · ${escapeHtml(attempt.duration_ms)} ms${attempt.error ? `<br><span>${escapeHtml(attempt.error)}</span>` : ''}</li>`).join('');
+    const price = result.price_eur == null ? '—' : `${Number(result.price_eur).toFixed(2)} EUR`;
+    byId('method-test-result').className = `method-test-result ${statusClass(result.status)}`;
+    byId('method-test-result').innerHTML = `<div><strong>${escapeHtml(result.status)}</strong> · ${escapeHtml(result.model)} · ${price} · total ${escapeHtml(result.duration_ms)} ms</div>${result.error ? `<p>${escapeHtml(result.error)}</p>` : ''}${attempts ? `<ol>${attempts}</ol>` : ''}`;
+  } catch (error) {
+    byId('method-test-result').className = 'method-test-result failed';
+    byId('method-test-result').textContent = error.message;
+  } finally { button.disabled = false; button.textContent = 'Run one test'; }
 }
 async function updateMaster(kind, enabled) {
   try { await api(`/sources/master/${kind}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }); await loadSources(); }
@@ -292,7 +344,8 @@ function shopCell(row, shop) {
   const retryLabel = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : null;
   const summary = item.status === 'SUCCESS' ? `${euro(item.price_eur)}${item.cached ? ' · cached' : ''}` : item.status === 'PENDING' ? 'Checking…' : item.status === 'COOLDOWN' ? 'Cooldown' : item.status.replaceAll('_', ' ');
   const linkLabel = item.status === 'ACTION_REQUIRED' ? 'Open verification' : `Open ${item.product_url ? 'product' : 'search'}`;
-  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
+  const attempts = (item.attempts || []).map(attempt => `${attempt.method}: ${attempt.result.toLowerCase()} (${attempt.duration_ms} ms)`).join(' · ');
+  return `<details class="cell-details"><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.collection_method ? `<span><b>Method:</b> ${escapeHtml(item.collection_method)}</span>` : ''}${attempts ? `<span class="muted">${escapeHtml(attempts)}</span>` : ''}${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
 }
 
 function columns() {
@@ -446,6 +499,7 @@ function wireEvents() {
   byId('source-rows').addEventListener('click', handleItemAction); byId('stock-rows').addEventListener('click', handleItemAction); byId('item-form').addEventListener('submit', saveItem);
   byId('dialog-close').addEventListener('click', () => byId('item-dialog').close()); byId('dialog-cancel').addEventListener('click', () => byId('item-dialog').close());
   byId('action-close').addEventListener('click', () => byId('action-dialog').close()); byId('action-later').addEventListener('click', () => byId('action-dialog').close());
+  byId('method-test-close').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-cancel').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-run').addEventListener('click', runMethodTest);
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('stop-run').addEventListener('click', hardStopRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));

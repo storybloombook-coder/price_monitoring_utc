@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -149,6 +150,56 @@ def create_app(
             raise HTTPException(404, "Browser job not found or already finished")
         return {"accepted": True}
 
+    @app.websocket("/browser-bridge/ws")
+    async def browser_bridge_websocket(websocket: WebSocket) -> None:
+        if websocket.headers.get("origin") != EXTENSION_ORIGIN:
+            await websocket.close(code=1008, reason="Bundled extension only")
+            return
+        await websocket.accept()
+        browser_bridge.websocket_connected()
+        receive_task = asyncio.create_task(websocket.receive_json())
+        job_task = asyncio.create_task(browser_bridge.next_job(25))
+        try:
+            await websocket.send_json({"type": "ready", "status": browser_bridge.status()})
+            while True:
+                done, _ = await asyncio.wait(
+                    {receive_task, job_task}, timeout=20, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    browser_bridge.heartbeat()
+                    await websocket.send_json({"type": "ping"})
+                    continue
+                if receive_task in done:
+                    message = receive_task.result()
+                    browser_bridge.heartbeat()
+                    message_type = str(message.get("type") or "")
+                    if message_type == "result":
+                        payload = message.get("payload") or {}
+                        html = str(payload.get("html") or "")
+                        if len(html) <= 8_000_000:
+                            browser_bridge.submit(str(message.get("job_id") or ""), {
+                                "html": html,
+                                "url": str(payload.get("url") or ""),
+                                "security_challenge": bool(payload.get("security_challenge")),
+                                "incomplete": bool(payload.get("incomplete")),
+                                "error": str(payload.get("error") or "")[:500],
+                            })
+                    elif message_type in {"hello", "heartbeat", "resume"}:
+                        await websocket.send_json({"type": "ack", "message_type": message_type})
+                    receive_task = asyncio.create_task(websocket.receive_json())
+                if job_task in done:
+                    job = job_task.result()
+                    if job:
+                        await websocket.send_json({"type": "job", "job": job})
+                    job_task = asyncio.create_task(browser_bridge.next_job(25))
+        except (WebSocketDisconnect, RuntimeError, ValueError):
+            pass
+        finally:
+            receive_task.cancel()
+            job_task.cancel()
+            await asyncio.gather(receive_task, job_task, return_exceptions=True)
+            browser_bridge.websocket_disconnected()
+
     @app.get("/catalog/summary")
     async def catalog_summary() -> dict[str, Any]:
         return catalog.stats()
@@ -160,9 +211,26 @@ def create_app(
     @app.patch("/sources/{key}")
     async def update_source(key: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
-            return catalog.update_source(key, bool(payload.get("enabled")))
+            return catalog.update_source(
+                key,
+                bool(payload["enabled"]) if "enabled" in payload else None,
+                str(payload["collection_method"]) if "collection_method" in payload else None,
+            )
         except KeyError as error:
             raise HTTPException(404, "Monitoring source not found") from error
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+
+    @app.post("/sources/{key}/test")
+    async def test_source_method(key: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return await shop_monitor.test_method(
+                int(payload.get("item_id")), key, str(payload.get("method") or "auto")
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            if isinstance(error, KeyError):
+                raise HTTPException(404, "Shop or monitoring model not found") from error
+            raise HTTPException(400, str(error)) from error
 
     @app.patch("/sources/master/{kind}")
     async def update_source_master(kind: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:

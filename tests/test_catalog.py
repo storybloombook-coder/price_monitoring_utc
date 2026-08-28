@@ -99,11 +99,15 @@ def test_source_toggles_and_manual_shop_links_are_persisted(tmp_path: Path) -> N
     assert store.get_item(item["id"])["shop_links"] == {"elesen": "https://www.elesen.lt/example"}
 
     store.update_source("senukai", False)
+    store.update_source("senukai", collection_method="playwright")
+    store.remember_source_method("senukai", "playwright")
     store.update_source_master("shop", False)
     senukai = next(source for source in store.list_sources() if source["key"] == "senukai")
     assert senukai["enabled"] is False
     assert senukai["master_enabled"] is False
     assert senukai["effective_enabled"] is False
+    assert senukai["collection_method"] == "playwright"
+    assert senukai["last_success_method"] == "playwright"
 
 
 def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_path: Path) -> None:

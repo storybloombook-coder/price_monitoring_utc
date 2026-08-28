@@ -31,6 +31,11 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         heartbeat = client.post("/browser-bridge/heartbeat", headers={"origin": EXTENSION_ORIGIN})
         assert heartbeat.status_code == 200
         assert heartbeat.json()["connected"] is True
+        with client.websocket_connect("/browser-bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as socket:
+            assert socket.receive_json()["type"] == "ready"
+            assert client.get("/browser-bridge/status").json()["transport"] == "websocket"
+            socket.send_json({"type": "heartbeat"})
+            assert socket.receive_json()["type"] == "ack"
 
         created = client.post(
             "/catalog/items/source",
@@ -64,6 +69,10 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert {item["name"] for item in sources if item["kind"] == "shop"} == {
             "Senukai", "Bite", "Varle", "Elesen", "Elisa", "Euronics", "RDE", "Smartech"
         }
+        method = client.patch("/sources/varle", json={"collection_method": "playwright"})
+        assert method.status_code == 200
+        assert method.json()["collection_method"] == "playwright"
+        assert client.patch("/sources/varle", json={"collection_method": "legacy"}).status_code == 400
         client.patch("/sources/master/marketplace", json={"enabled": False})
         client.patch("/sources/master/shop", json={"enabled": False})
         started = client.post("/runs", json={})

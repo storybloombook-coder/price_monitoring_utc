@@ -22,6 +22,8 @@ The portable folder includes `edge-extension`, which lets PriceMonitor use a nor
 
 Keep Edge open during monitoring. When a retailer displays a human verification, complete it in the visible tab. The extension has a fixed identity and communicates only with the local PriceMonitor server and the configured retailer domains.
 
+The extension uses a local WebSocket live channel with a 20-second keepalive and automatic reconnect backoff. HTTP polling remains available as a recovery watchdog. The portable builder updates extension files in place instead of deleting the loaded unpacked directory; after an extension-code update, use **Reload** once on `edge://extensions` so Edge activates the new worker.
+
 ## Editable catalog
 
 After Setup, open **Position management**. The panel has two synchronized lists:
@@ -34,6 +36,14 @@ Both lists support manual creation, editing, search, pause/resume, soft deletion
 ## Monitoring sources and results
 
 Marketplaces and shops have individual switches plus master switches for each group. Shops are grouped by Lithuania, Latvia, and Estonia. A model can use automatic shop search or an optional direct product URL saved in its editor.
+
+Each direct shop has an independent collection method selector:
+
+- **Auto · gentle fallback** starts with a lightweight direct request, uses Playwright/background Edge only when JavaScript rendering is needed, and goes straight to the normal-browser extension when retailer protection is detected.
+- **Direct request**, **Background Edge**, **Playwright Edge**, and **Browser extension** pin a check to one path for diagnostics or site-specific operation.
+- **Manual only** sends no automated retailer request and reports the check for human review.
+
+The **Test** button beside a shop runs exactly one selected method against one monitoring model. It reports the status, price, duration, method attempts, and protection errors without starting a full monitoring run. Successful automatic checks remember the last working browser strategy for that shop. Marketplace collection currently exposes **Auto** and **Legacy engine**, because its adapters are still hosted by the bundled v3 service.
 
 The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Columns can be shown or hidden from the **Columns** menu; column visibility is retained in the browser. Use **Hard stop** to cancel a stuck run while preserving completed results.
 

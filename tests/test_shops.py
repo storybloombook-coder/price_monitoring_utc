@@ -58,7 +58,7 @@ def test_security_challenge_is_reported_as_action_required() -> None:
 
     args, kwargs = asyncio.run(run())
     assert args[3] == "ACTION_REQUIRED"
-    assert "normal browser" in kwargs["error"]
+    assert "extension is not connected" in kwargs["error"]
     assert kwargs["retry_after"] == "2026-08-27T23:00:00+00:00"
 
 
@@ -152,6 +152,68 @@ def test_rate_limit_honors_retry_after_and_does_not_open_browser() -> None:
     assert retry_after_seconds("45", 3600) == 45
 
 
+def test_direct_only_does_not_fallback_after_protection() -> None:
+    class Store:
+        observation = None
+
+        def pause_shop_for_protection(self, run_id, shop_key, cooldown_seconds, reason) -> str:
+            return "2026-08-28T00:00:00+00:00"
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> None:
+            raise AssertionError("Direct-only mode must not open a browser")
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(lambda request: httpx.Response(403, request=request))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, Renderer(), "direct-only", {"id": 10, "model": "55T7B", "shop_links": {}},
+                {"key": "varle", "collection_method": "direct"},
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "ACTION_REQUIRED"
+    assert kwargs["collection_method"] == "direct"
+    assert [attempt["method"] for attempt in kwargs["attempts"]] == ["direct"]
+
+
+def test_manual_only_sends_no_request_and_does_not_start_protection_cooldown() -> None:
+    class Store:
+        observation = None
+
+        def pause_shop_for_protection(self, *args) -> str:
+            raise AssertionError("Manual-only mode must not start retailer protection cooldown")
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str) -> None:
+            raise AssertionError("Manual-only mode must not open a browser")
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(lambda request: (_ for _ in ()).throw(AssertionError("No HTTP request expected")))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, Renderer(), "manual-only", {"id": 11, "model": "55T7B", "shop_links": {}},
+                {"key": "varle", "collection_method": "manual"},
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "ACTION_REQUIRED"
+    assert kwargs["retry_after"] is None
+    assert kwargs["attempts"] == []
+
+
 def test_shop_run_never_overlaps_requests_to_the_same_domain() -> None:
     class Store:
         def shop_observation_pending(self, run_id, item_id, shop_key) -> bool:
@@ -167,7 +229,7 @@ def test_shop_run_never_overlaps_requests_to_the_same_domain() -> None:
         global_active = 0
         global_maximum = 0
 
-        async def check(client, renderer, run_id, model, shop) -> None:
+        async def check(client, renderer, run_id, model, shop, playwright_renderer=None) -> None:
             nonlocal global_active, global_maximum
             key = shop["key"]
             active[key] += 1

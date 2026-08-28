@@ -3,8 +3,14 @@ const POLL_ALARM = 'price-monitor-poll';
 const MAX_ACTIVE_JOBS = 1;
 const JOB_TIMEOUT_MS = 45000;
 const JOB_ALARM_PREFIX = 'price-monitor-job:';
+const SOCKET_HEARTBEAT_MS = 20000;
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
 let polling = false;
 const inspecting = new Set();
+let bridgeSocket = null;
+let socketHeartbeat = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
 
 async function settings() {
   const saved = await chrome.storage.local.get({ appUrl: DEFAULT_APP_URL, closeSuccessfulTabs: true });
@@ -29,6 +35,76 @@ async function setStatus(status, message, extra = {}) {
 async function bridgeFetch(path, options = {}) {
   const { appUrl } = await settings();
   return fetch(`${appUrl}${path}`, { cache: 'no-store', ...options });
+}
+
+function socketUrl(appUrl) {
+  const url = new URL(appUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = '/browser-bridge/ws';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function socketOpen() {
+  return bridgeSocket?.readyState === WebSocket.OPEN;
+}
+
+function sendSocket(message) {
+  if (!socketOpen()) return false;
+  bridgeSocket.send(JSON.stringify(message));
+  return true;
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connectWebSocket();
+  }, delay);
+}
+
+async function connectWebSocket() {
+  if (bridgeSocket?.readyState === WebSocket.OPEN || bridgeSocket?.readyState === WebSocket.CONNECTING) return;
+  const { appUrl } = await settings();
+  const socket = new WebSocket(socketUrl(appUrl));
+  bridgeSocket = socket;
+  socket.onopen = async () => {
+    reconnectAttempt = 0;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    if (socketHeartbeat) clearInterval(socketHeartbeat);
+    socketHeartbeat = setInterval(() => sendSocket({ type: 'heartbeat', at: Date.now() }), SOCKET_HEARTBEAT_MS);
+    const jobs = await activeJobs();
+    sendSocket({ type: 'hello', active_job_ids: Object.keys(jobs) });
+    await setStatus('connected', 'Connected to PriceMonitor · live channel');
+    await resumeJobs().catch(() => {});
+  };
+  socket.onmessage = event => {
+    let message;
+    try { message = JSON.parse(event.data); } catch { return; }
+    if (message.type === 'ping') {
+      sendSocket({ type: 'heartbeat', at: Date.now() });
+      return;
+    }
+    if (message.type === 'job' && message.job) {
+      void activeJobs().then(jobs => {
+        if (jobs[message.job.id]) return inspectJob(message.job.id);
+        if (Object.keys(jobs).length >= MAX_ACTIVE_JOBS) return;
+        void acceptJob(message.job);
+      });
+    }
+  };
+  socket.onerror = () => socket.close();
+  socket.onclose = () => {
+    if (bridgeSocket === socket) bridgeSocket = null;
+    if (socketHeartbeat) clearInterval(socketHeartbeat);
+    socketHeartbeat = null;
+    void setStatus('reconnecting', 'Reconnecting to PriceMonitor…');
+    scheduleReconnect();
+  };
 }
 
 async function heartbeat() {
@@ -168,6 +244,7 @@ async function pollOnce() {
 }
 
 async function pollLoop() {
+  if (socketOpen()) return;
   if (polling) return;
   polling = true;
   try {
@@ -189,18 +266,22 @@ async function resumeJobs() {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-  void pollLoop();
+  void connectWebSocket();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-  void resumeJobs().then(pollLoop);
+  void connectWebSocket();
+  void resumeJobs();
 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name.startsWith(JOB_ALARM_PREFIX)) {
     void inspectJob(alarm.name.slice(JOB_ALARM_PREFIX.length));
     return;
   }
-  if (alarm.name === POLL_ALARM) void resumeJobs().then(pollLoop).catch(error => setStatus('disconnected', String(error)));
+  if (alarm.name === POLL_ALARM) {
+    void connectWebSocket();
+    if (!socketOpen()) void resumeJobs().then(pollLoop).catch(error => setStatus('reconnecting', String(error)));
+  }
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== 'complete') return;
@@ -226,15 +307,19 @@ chrome.tabs.onRemoved.addListener(tabId => {
   });
 });
 chrome.storage.onChanged.addListener(changes => {
-  if (changes.appUrl) void pollLoop();
+  if (changes.appUrl) {
+    bridgeSocket?.close();
+    void connectWebSocket();
+  }
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'connect') return false;
-  heartbeat()
-    .then(() => pollLoop())
+  connectWebSocket()
+    .then(() => heartbeat())
     .then(() => sendResponse({ ok: true }))
     .catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
   return true;
 });
 void chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-void resumeJobs().then(pollLoop).catch(error => setStatus('disconnected', String(error)));
+void connectWebSocket();
+void resumeJobs().catch(error => setStatus('reconnecting', String(error)));
