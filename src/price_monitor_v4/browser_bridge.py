@@ -47,6 +47,7 @@ class BrowserBridge:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._jobs: dict[str, CaptureJob] = {}
         self._websocket_connections = 0
+        self._capture_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -76,25 +77,26 @@ class BrowserBridge:
         }
 
     async def capture(self, shop_key: str, model: str, url: str) -> dict[str, Any]:
-        if not self.connected:
-            raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
-        loop = asyncio.get_running_loop()
-        job = CaptureJob(
-            id=str(uuid.uuid4()),
-            shop_key=shop_key,
-            model=model,
-            url=url,
-            created_at=time.monotonic(),
-            future=loop.create_future(),
-        )
-        self._jobs[job.id] = job
-        self._queue.put_nowait(job.id)
-        try:
-            return await asyncio.wait_for(asyncio.shield(job.future), timeout=self.timeout_seconds)
-        except TimeoutError as error:
-            raise BrowserBridgeTimeout("The Edge extension did not finish browser verification in time") from error
-        finally:
-            self._jobs.pop(job.id, None)
+        async with self._capture_lock:
+            if not self.connected:
+                raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
+            loop = asyncio.get_running_loop()
+            job = CaptureJob(
+                id=str(uuid.uuid4()),
+                shop_key=shop_key,
+                model=model,
+                url=url,
+                created_at=time.monotonic(),
+                future=loop.create_future(),
+            )
+            self._jobs[job.id] = job
+            self._queue.put_nowait(job.id)
+            try:
+                return await asyncio.wait_for(asyncio.shield(job.future), timeout=self.timeout_seconds)
+            except TimeoutError as error:
+                raise BrowserBridgeTimeout("The Edge extension did not finish browser verification in time") from error
+            finally:
+                self._jobs.pop(job.id, None)
 
     async def next_job(self, wait_seconds: float = 25) -> dict[str, Any] | None:
         self.heartbeat()

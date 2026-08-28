@@ -24,7 +24,10 @@ class MonitoringSource:
 
 SOURCES = (
     MonitoringSource("kaina24", "Kaina24", "marketplace", "Lithuania", "https://www.kaina24.lt/"),
-    MonitoringSource("salidzini", "Salidzini", "marketplace", "Latvia", "https://www.salidzini.lv/"),
+    MonitoringSource(
+        "salidzini", "Salidzini", "marketplace", "Latvia", "https://www.salidzini.lv/",
+        "https://www.salidzini.lv/cena?q={query}",
+    ),
     MonitoringSource("hinnavaatlus", "Hinnavaatlus", "marketplace", "Estonia", "https://www.hinnavaatlus.ee/"),
     MonitoringSource("senukai", "Senukai", "shop", "Lithuania", "https://www.senukai.lt/", "https://www.senukai.lt/paieska?q={query}"),
     MonitoringSource("bite", "Bite", "shop", "Lithuania", "https://www.bite.lt/", "https://www.bite.lt/tcl"),

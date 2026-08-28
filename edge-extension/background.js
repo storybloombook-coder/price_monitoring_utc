@@ -1,16 +1,12 @@
 const DEFAULT_APP_URL = 'http://127.0.0.1:8000';
 const POLL_ALARM = 'price-monitor-poll';
 const MAX_ACTIVE_JOBS = 1;
-const JOB_TIMEOUT_MS = 45000;
+const JOB_TIMEOUT_MS = 135000;
 const JOB_ALARM_PREFIX = 'price-monitor-job:';
-const SOCKET_HEARTBEAT_MS = 20000;
-const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
+const OFFSCREEN_PATH = 'offscreen.html';
 let polling = false;
 const inspecting = new Set();
-let bridgeSocket = null;
-let socketHeartbeat = null;
-let reconnectTimer = null;
-let reconnectAttempt = 0;
+let creatingOffscreen = null;
 
 async function settings() {
   const saved = await chrome.storage.local.get({ appUrl: DEFAULT_APP_URL, closeSuccessfulTabs: true });
@@ -37,74 +33,36 @@ async function bridgeFetch(path, options = {}) {
   return fetch(`${appUrl}${path}`, { cache: 'no-store', ...options });
 }
 
-function socketUrl(appUrl) {
-  const url = new URL(appUrl);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.pathname = '/browser-bridge/ws';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
+async function ensureOffscreenDocument() {
+  const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [offscreenUrl]
+  });
+  if (contexts.length) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: OFFSCREEN_PATH,
+      reasons: ['WORKERS'],
+      justification: 'Maintain the local PriceMonitor connection in a dedicated worker'
+    }).finally(() => { creatingOffscreen = null; });
+  }
+  await creatingOffscreen;
 }
 
-function socketOpen() {
-  return bridgeSocket?.readyState === WebSocket.OPEN;
-}
-
-function sendSocket(message) {
-  if (!socketOpen()) return false;
-  bridgeSocket.send(JSON.stringify(message));
-  return true;
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
-  reconnectAttempt += 1;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    void connectWebSocket();
-  }, delay);
-}
-
-async function connectWebSocket() {
-  if (bridgeSocket?.readyState === WebSocket.OPEN || bridgeSocket?.readyState === WebSocket.CONNECTING) return;
+async function configureLiveChannel() {
+  await ensureOffscreenDocument();
   const { appUrl } = await settings();
-  const socket = new WebSocket(socketUrl(appUrl));
-  bridgeSocket = socket;
-  socket.onopen = async () => {
-    reconnectAttempt = 0;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    if (socketHeartbeat) clearInterval(socketHeartbeat);
-    socketHeartbeat = setInterval(() => sendSocket({ type: 'heartbeat', at: Date.now() }), SOCKET_HEARTBEAT_MS);
-    const jobs = await activeJobs();
-    sendSocket({ type: 'hello', active_job_ids: Object.keys(jobs) });
-    await setStatus('connected', 'Connected to PriceMonitor · live channel');
-    await resumeJobs().catch(() => {});
-  };
-  socket.onmessage = event => {
-    let message;
-    try { message = JSON.parse(event.data); } catch { return; }
-    if (message.type === 'ping') {
-      sendSocket({ type: 'heartbeat', at: Date.now() });
-      return;
-    }
-    if (message.type === 'job' && message.job) {
-      void activeJobs().then(jobs => {
-        if (jobs[message.job.id]) return inspectJob(message.job.id);
-        if (Object.keys(jobs).length >= MAX_ACTIVE_JOBS) return;
-        void acceptJob(message.job);
-      });
-    }
-  };
-  socket.onerror = () => socket.close();
-  socket.onclose = () => {
-    if (bridgeSocket === socket) bridgeSocket = null;
-    if (socketHeartbeat) clearInterval(socketHeartbeat);
-    socketHeartbeat = null;
-    void setStatus('reconnecting', 'Reconnecting to PriceMonitor…');
-    scheduleReconnect();
-  };
+  const jobs = await activeJobs();
+  await chrome.runtime.sendMessage({
+    target: 'offscreen', type: 'configure', appUrl, activeJobIds: Object.keys(jobs)
+  }).catch(() => {});
+}
+
+async function liveChannelConnected() {
+  const saved = await chrome.storage.local.get({ offscreenSocketState: null });
+  const state = saved.offscreenSocketState;
+  return Boolean(state?.connected && Date.now() - Number(state.updatedAt || 0) < 45000);
 }
 
 async function heartbeat() {
@@ -124,6 +82,8 @@ function extractRenderedPage(model) {
     document.querySelector('[class*="cf-chl"], #challenge-running, iframe[src*="challenges.cloudflare.com"]')
   );
   const expected = String(model || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hasPrice = value => /(?:\d[\d\s.,]{0,14})\s*(?:€|EUR)(?!\w)/i.test(String(value || ''));
   const metadata = [...document.querySelectorAll('meta, script[type="application/ld+json"]')]
     .map(element => element.outerHTML)
     .join('\n');
@@ -136,12 +96,31 @@ function extractRenderedPage(model) {
     .slice(0, 400)
     .map(anchor => `<a href="${anchor.href.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}">${String(anchor.textContent || '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</a>`)
     .join('\n');
+  const rawCandidates = [...document.querySelectorAll('article, li, tr, [class*="product"], [class*="offer"], [class*="item"], div')]
+    .slice(0, 20000)
+    .map(element => ({ element, text: String(element.innerText || '').trim() }))
+    .filter(candidate => candidate.text.length >= 8 && candidate.text.length <= 3000 && hasPrice(candidate.text) && normalize(candidate.text).includes(expected))
+    .sort((left, right) => left.text.length - right.text.length);
+  const selectedCandidates = [];
+  for (const candidate of rawCandidates) {
+    if (selectedCandidates.some(selected => candidate.element.contains(selected.element))) continue;
+    if (selectedCandidates.some(selected => selected.text === candidate.text)) continue;
+    selectedCandidates.push(candidate);
+    if (selectedCandidates.length >= 100) break;
+  }
+  const candidateData = selectedCandidates.map(candidate => ({
+    text: candidate.text,
+    links: [...candidate.element.querySelectorAll('a[href]')].slice(0, 20).map(anchor => ({
+      text: String(anchor.textContent || '').trim(), url: anchor.href
+    }))
+  }));
+  const candidateJson = JSON.stringify(candidateData).replaceAll('<', '\\u003c');
   const escapedText = bodyText.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   const incomplete = Boolean(document.querySelector('[class*="MuiSkeleton"]')) && !links;
   return {
     url: location.href,
     title: document.title,
-    html: `<html><head>${metadata}</head><body>${links}<pre>${escapedText}</pre></body></html>`,
+    html: `<html><head>${metadata}<script id="price-monitor-candidates" type="application/json">${candidateJson}</script></head><body>${links}<pre>${escapedText}</pre></body></html>`,
     security_challenge: securityChallenge,
     incomplete
   };
@@ -244,7 +223,7 @@ async function pollOnce() {
 }
 
 async function pollLoop() {
-  if (socketOpen()) return;
+  if (await liveChannelConnected()) return;
   if (polling) return;
   polling = true;
   try {
@@ -266,11 +245,11 @@ async function resumeJobs() {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-  void connectWebSocket();
+  void configureLiveChannel();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-  void connectWebSocket();
+  void configureLiveChannel();
   void resumeJobs();
 });
 chrome.alarms.onAlarm.addListener(alarm => {
@@ -279,8 +258,10 @@ chrome.alarms.onAlarm.addListener(alarm => {
     return;
   }
   if (alarm.name === POLL_ALARM) {
-    void connectWebSocket();
-    if (!socketOpen()) void resumeJobs().then(pollLoop).catch(error => setStatus('reconnecting', String(error)));
+    void configureLiveChannel();
+    void liveChannelConnected().then(connected => {
+      if (!connected) void resumeJobs().then(pollLoop).catch(error => setStatus('reconnecting', String(error)));
+    });
   }
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -307,19 +288,32 @@ chrome.tabs.onRemoved.addListener(tabId => {
   });
 });
 chrome.storage.onChanged.addListener(changes => {
-  if (changes.appUrl) {
-    bridgeSocket?.close();
-    void connectWebSocket();
-  }
+  if (changes.appUrl) void configureLiveChannel();
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.target === 'service-worker') {
+    if (message.type === 'offscreen-ready') {
+      void configureLiveChannel();
+    } else if (message.type === 'socket-state') {
+      void chrome.storage.local.set({ offscreenSocketState: message });
+      void setStatus(message.connected ? 'connected' : 'reconnecting', message.message || 'Updating live channel…');
+      if (message.connected) void resumeJobs().catch(() => {});
+    } else if (message.type === 'job' && message.job) {
+      void activeJobs().then(jobs => {
+        if (jobs[message.job.id]) return inspectJob(message.job.id);
+        if (Object.keys(jobs).length >= MAX_ACTIVE_JOBS) return;
+        void acceptJob(message.job);
+      });
+    }
+    return false;
+  }
   if (message?.type !== 'connect') return false;
-  connectWebSocket()
+  configureLiveChannel()
     .then(() => heartbeat())
     .then(() => sendResponse({ ok: true }))
     .catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
   return true;
 });
 void chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
-void connectWebSocket();
+void configureLiveChannel();
 void resumeJobs().catch(error => setStatus('reconnecting', String(error)));

@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import __version__
+from .assisted_marketplaces import AssistedMarketplaceMonitor
 from .browser_bridge import BrowserBridge, EXTENSION_ORIGIN
 from .catalog import CatalogStore
 from .config import Settings
@@ -47,6 +48,16 @@ def create_app(
         cooldown_seconds=float(app_settings.env.get("SHOP_COOLDOWN_SECONDS", "3600")),
         cache_ttl_seconds=float(app_settings.env.get("SHOP_CACHE_TTL_SECONDS", "14400")),
     )
+    assisted_marketplace_monitor = AssistedMarketplaceMonitor(
+        catalog,
+        browser_bridge,
+        cache_ttl_seconds=float(
+            app_settings.env.get("ASSISTED_MARKETPLACE_CACHE_TTL_SECONDS", "43200")
+        ),
+        request_delay_seconds=float(
+            app_settings.env.get("ASSISTED_MARKETPLACE_DELAY_SECONDS", "3")
+        ),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -64,6 +75,7 @@ def create_app(
         try:
             yield
         finally:
+            assisted_marketplace_monitor.stop()
             shop_monitor.stop()
             browser_bridge.stop()
             legacy_service.stop()
@@ -79,6 +91,7 @@ def create_app(
     app.state.catalog = catalog
     app.state.legacy = legacy_service
     app.state.shop_monitor = shop_monitor
+    app.state.assisted_marketplace_monitor = assisted_marketplace_monitor
     app.state.browser_bridge = browser_bridge
     static_dir = Path(__file__).resolve().parent / "static"
 
@@ -110,6 +123,7 @@ def create_app(
                 "delay_seconds": [shop_monitor.request_delay_min_seconds, shop_monitor.request_delay_max_seconds],
                 "cooldown_seconds": shop_monitor.cooldown_seconds,
                 "cache_ttl_seconds": shop_monitor.cache_ttl_seconds,
+                "assisted_marketplace_cache_ttl_seconds": assisted_marketplace_monitor.cache_ttl_seconds,
             },
             "catalog": catalog.stats(),
         }
@@ -403,9 +417,16 @@ def create_app(
             return await legacy_json("GET", f"/runs/{run_id}")
         if session["legacy_started"]:
             run = await legacy_json("GET", f"/runs/{run_id}")
+            assisted_keys = assisted_marketplace_monitor.supported_keys.intersection(
+                session["marketplace_keys"]
+            )
             run["tasks"] = [
                 task for task in run.get("tasks", [])
                 if marketplace_allowed(str(task.get("marketplace", "")), session["marketplace_keys"])
+                and not any(
+                    key.replace(".", "") in str(task.get("marketplace", "")).lower().replace(".", "")
+                    for key in assisted_keys
+                )
             ]
         else:
             run = {
@@ -416,11 +437,17 @@ def create_app(
                 "tasks": [],
                 "started_at": session["created_at"],
             }
+        assisted = catalog.assisted_marketplace_run(run_id)
+        run["tasks"] = [*run.get("tasks", []), *assisted["results"]]
         shop = catalog.shop_run(run_id)
         run["shop_results"] = shop["results"]
         if session.get("stopped_at"):
             run["status"] = "INCOMPLETE"
-        elif shop["status"] == "RUNNING" or run.get("status") == "RUNNING":
+        elif (
+            shop["status"] == "RUNNING"
+            or assisted["status"] == "RUNNING"
+            or run.get("status") == "RUNNING"
+        ):
             run["status"] = "RUNNING"
         elif run.get("status") not in {"FAILED", "INCOMPLETE"}:
             run["status"] = "COMPLETE"
@@ -440,7 +467,10 @@ def create_app(
         catalog.prepare_legacy(app_settings.original_database, app_settings.legacy_database, app_settings.active_workbook)
         sources = catalog.list_sources()
         marketplaces = [source["key"] for source in sources if source["kind"] == "marketplace" and source["effective_enabled"]]
-        if marketplaces:
+        legacy_marketplaces = [
+            key for key in marketplaces if key not in assisted_marketplace_monitor.supported_keys
+        ]
+        if legacy_marketplaces:
             legacy_run = await legacy_json("POST", "/runs", payload)
             run_id = str(legacy_run.get("run_id") or legacy_run.get("id"))
             if not run_id or run_id == "None":
@@ -451,6 +481,7 @@ def create_app(
             legacy_started = False
         catalog.register_monitoring_session(run_id, legacy_started, marketplaces)
         shop_monitor.start(run_id)
+        assisted_marketplace_monitor.start(run_id)
         return JSONResponse({"run_id": run_id, "status": "RUNNING"})
 
     @app.get("/runs/latest")
@@ -470,6 +501,7 @@ def create_app(
         if not session:
             raise HTTPException(404, "Monitoring run not found")
         await shop_monitor.cancel_run(run_id)
+        await assisted_marketplace_monitor.cancel_run(run_id)
         catalog.stop_monitoring_session(run_id)
         if session["legacy_started"]:
             legacy_service.stop()
@@ -508,6 +540,49 @@ def create_app(
             )
         except KeyError as error:
             raise HTTPException(404, "Shop observation not found") from error
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return result
+
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{marketplace_key}/retry")
+    async def retry_assisted_marketplace_check(
+        run_id: str, item_id: int, marketplace_key: str
+    ) -> dict[str, Any]:
+        try:
+            assisted_marketplace_monitor.retry(run_id, item_id, marketplace_key)
+        except KeyError as error:
+            raise HTTPException(404, "Assisted marketplace observation not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {
+            "run_id": run_id, "item_id": item_id,
+            "marketplace_key": marketplace_key, "status": "PENDING",
+        }
+
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{marketplace_key}/resolve")
+    async def resolve_assisted_marketplace_check(
+        run_id: str,
+        item_id: int,
+        marketplace_key: str,
+        payload: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        try:
+            status = str(payload.get("status") or "").upper()
+            price = payload.get("price_eur")
+            result = catalog.resolve_assisted_marketplace_observation(
+                run_id,
+                item_id,
+                marketplace_key,
+                status,
+                price_eur=float(price) if price not in (None, "") else None,
+                availability=str(payload.get("availability") or "IN_STOCK"),
+            )
+        except KeyError as error:
+            raise HTTPException(404, "Assisted marketplace observation not found") from error
         except (TypeError, ValueError) as error:
             raise HTTPException(400, str(error)) from error
         export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"

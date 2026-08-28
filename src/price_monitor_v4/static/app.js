@@ -5,6 +5,7 @@ const SHOP_METHODS = [
   ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual only']
 ];
 const MARKETPLACE_METHODS = [['auto', 'Auto'], ['legacy', 'Legacy engine']];
+const ASSISTED_MARKETPLACE_METHODS = [['auto', 'Assisted · Edge + manual']];
 const STATUS_HELP = {
   active: 'Enabled and available for the normal workflow.',
   paused: 'Temporarily excluded from monitoring without deleting the position.',
@@ -129,7 +130,7 @@ async function loadCatalog() {
 }
 
 function sourceSwitch(item) {
-  const methods = item.kind === 'shop' ? SHOP_METHODS : MARKETPLACE_METHODS;
+  const methods = item.kind === 'shop' ? SHOP_METHODS : item.key === 'salidzini' ? ASSISTED_MARKETPLACE_METHODS : MARKETPLACE_METHODS;
   const options = methods.map(([value, label]) => `<option value="${value}" ${item.collection_method === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
   const learned = item.last_success_method ? `<span class="learned-method">Last success: ${escapeHtml(item.last_success_method)}</span>` : '';
   return `<div class="source-item ${item.master_enabled ? '' : 'master-disabled'}"><div class="source-identity"><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>${learned}</div>
@@ -149,6 +150,7 @@ function renderSources() {
     return `<div class="country-block"><span class="country-name">${country}</span><div class="country-shops">${items.length ? items.map(sourceSwitch).join('') : '<span class="muted">No shops configured yet.</span>'}</div></div>`;
   }).join('');
   byId('shop-link-inputs').innerHTML = shops.map(item => `<label>${escapeHtml(item.name)}<input data-shop-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
+  byId('marketplace-link-inputs').innerHTML = marketplaces.filter(item => item.key === 'salidzini').map(item => `<label>${escapeHtml(item.name)}<input data-marketplace-link="${escapeHtml(item.key)}" type="url" placeholder="${escapeHtml(item.base_url)}product…"></label>`).join('');
   document.querySelectorAll('[data-source-key]').forEach(input => input.addEventListener('change', () => updateSource(input.dataset.sourceKey, input.checked)));
   document.querySelectorAll('[data-source-method]').forEach(select => select.addEventListener('change', () => updateSourceMethod(select.dataset.sourceMethod, select.value)));
   document.querySelectorAll('[data-test-source]').forEach(button => button.addEventListener('click', () => openMethodTest(button.dataset.testSource)));
@@ -228,6 +230,7 @@ function openEditor(kind, item = null) {
     byId('source-model').value = item?.model || ''; const sheets = item?.source_sheets || ['TV'];
     document.querySelectorAll('[name="source-sheet"]').forEach(input => { input.checked = sheets.includes(input.value); });
     document.querySelectorAll('[data-shop-link]').forEach(input => { input.value = item?.shop_links?.[input.dataset.shopLink] || ''; });
+    document.querySelectorAll('[data-marketplace-link]').forEach(input => { input.value = item?.marketplace_links?.[input.dataset.marketplaceLink] || ''; });
   } else {
     byId('stock-name').value = item?.nomenclature || ''; byId('stock-model').value = item?.model || ''; byId('stock-warehouse').value = item?.warehouse || '';
     byId('stock-quantity').value = item?.quantity ?? 0; byId('stock-cost').value = item?.unit_cost_eur ?? 0;
@@ -238,7 +241,8 @@ function openEditor(kind, item = null) {
 async function saveItem(event) {
   event.preventDefault(); const kind = byId('item-kind').value; const id = byId('item-id').value;
   const shopLinks = Object.fromEntries([...document.querySelectorAll('[data-shop-link]')].map(input => [input.dataset.shopLink, input.value.trim()]));
-  const payload = kind === 'source' ? { model: byId('source-model').value, source_sheets: [...document.querySelectorAll('[name="source-sheet"]:checked')].map(input => input.value), shop_links: shopLinks, paused: byId('item-paused').checked }
+  const marketplaceLinks = Object.fromEntries([...document.querySelectorAll('[data-marketplace-link]')].map(input => [input.dataset.marketplaceLink, input.value.trim()]));
+  const payload = kind === 'source' ? { model: byId('source-model').value, source_sheets: [...document.querySelectorAll('[name="source-sheet"]:checked')].map(input => input.value), shop_links: shopLinks, marketplace_links: marketplaceLinks, paused: byId('item-paused').checked }
     : { nomenclature: byId('stock-name').value, model: byId('stock-model').value, warehouse: byId('stock-warehouse').value, quantity: Number(byId('stock-quantity').value || 0), unit_cost_eur: Number(byId('stock-cost').value || 0), paused: byId('item-paused').checked };
   try {
     await api(id ? `/catalog/items/${id}` : `/catalog/items/${kind}`, { method: id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -323,7 +327,7 @@ function resultCounts(row) {
     notFound: statuses.filter(value => value === 'NOT_FOUND').length,
     actionRequired: statuses.filter(value => value === 'ACTION_REQUIRED').length,
     cooldown: statuses.filter(value => value === 'COOLDOWN').length,
-    cached: Object.values(row.shops).filter(item => item.status === 'SUCCESS' && item.cached).length,
+    cached: [...row.tasks, ...Object.values(row.shops)].filter(item => item.status === 'SUCCESS' && item.cached).length,
     pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
   };
 }
@@ -433,14 +437,16 @@ function renderResults() {
 }
 
 function renderActionRequired(run) {
-  const items = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED');
+  const shopItems = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED').map(item => ({ ...item, action_kind: 'shops', action_key: item.shop_key, action_name: item.shop_name || item.shop_key }));
+  const marketplaceItems = state.tasks.filter(item => item.status === 'ACTION_REQUIRED' && item.assisted).map(item => ({ ...item, model: item.source_model || item.canonical_model, action_kind: 'marketplaces', action_key: item.marketplace_key, action_name: item.marketplace || item.marketplace_key }));
+  const items = [...shopItems, ...marketplaceItems];
   state.actionItems = items;
   const review = byId('review-actions');
   review.hidden = items.length === 0;
   review.textContent = items.length ? `Review required checks (${items.length})` : 'Review required checks';
   byId('action-items').innerHTML = items.length ? items.map(item => {
     const link = item.product_url || item.search_url;
-    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.shop_name || item.shop_key)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Capture again</button><button type="button" class="secondary" data-check-action="not-found" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Mark not found</button><button type="button" class="secondary" data-check-action="manual-price" data-item-id="${item.item_id}" data-shop-key="${escapeHtml(item.shop_key)}">Save manual price</button></div></div>`;
+    return `<div class="action-item"><div><strong>${escapeHtml(item.model)} · ${escapeHtml(item.action_name)}</strong><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Capture again</button><button type="button" class="secondary" data-check-action="not-found" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Mark not found</button><button type="button" class="secondary" data-check-action="manual-price" data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}">Save manual price</button></div></div>`;
   }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
 
   if (!items.length) {
@@ -448,7 +454,7 @@ function renderActionRequired(run) {
     if (byId('action-dialog').open) byId('action-dialog').close();
     return;
   }
-  const signature = items.map(item => `${item.item_id}:${item.shop_key}`).sort().join('|');
+  const signature = items.map(item => `${item.action_kind}:${item.item_id}:${item.action_key}`).sort().join('|');
   if (run.status === 'COMPLETE' && signature !== state.lastActionSignature) {
     state.lastActionSignature = signature;
     if (!byId('action-dialog').open) byId('action-dialog').showModal();
@@ -461,7 +467,7 @@ async function handleActionDialog(event) {
   const action = button.dataset.checkAction;
   let payload = null;
   if (action === 'not-found') {
-    if (!window.confirm('Confirm that this model is not available from this shop?')) return;
+    if (!window.confirm('Confirm that this model is not available from this source?')) return;
     payload = { status: 'NOT_FOUND' };
   }
   if (action === 'manual-price') {
@@ -478,7 +484,7 @@ async function handleActionDialog(event) {
   button.disabled = true;
   button.textContent = action === 'retry' ? 'Capturing…' : 'Saving…';
   try {
-    const base = `/runs/${encodeURIComponent(state.currentRunId)}/shops/${button.dataset.itemId}/${encodeURIComponent(button.dataset.shopKey)}`;
+    const base = `/runs/${encodeURIComponent(state.currentRunId)}/${button.dataset.checkKind}/${button.dataset.itemId}/${encodeURIComponent(button.dataset.sourceKey)}`;
     if (action === 'retry') {
       await api(`${base}/retry`, { method: 'POST' });
     } else {
@@ -506,7 +512,7 @@ function renderRun(run) {
   const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
   const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
   const cooldown = all.filter(item => item.status === 'COOLDOWN').length;
-  const cached = state.shopResults.filter(item => item.status === 'SUCCESS' && item.cached).length;
+  const cached = all.filter(item => item.status === 'SUCCESS' && item.cached).length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
   const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;

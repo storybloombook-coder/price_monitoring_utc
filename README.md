@@ -22,7 +22,7 @@ The portable folder includes `edge-extension`, which lets PriceMonitor use a nor
 
 Keep Edge open during monitoring. When a retailer displays a human verification, complete it in the visible tab. The extension has a fixed identity and communicates only with the local PriceMonitor server and the configured retailer domains.
 
-The extension uses a local WebSocket live channel with a 20-second keepalive and automatic reconnect backoff. HTTP polling remains available as a recovery watchdog. The portable builder updates extension files in place instead of deleting the loaded unpacked directory; after an extension-code update, use **Reload** once on `edge://extensions` so Edge activates the new worker.
+The extension keeps its local WebSocket in a dedicated offscreen worker rather than the short-lived Manifest V3 service worker. It sends a 20-second keepalive, reconnects automatically with backoff, preserves active tab jobs in extension storage, and keeps HTTP polling as a recovery watchdog. Visible verification has up to 135 seconds to finish. The portable builder updates extension files in place instead of deleting the loaded unpacked directory; after an extension-code update, use **Reload** once on `edge://extensions` so Edge activates the new worker.
 
 ## Editable catalog
 
@@ -43,13 +43,15 @@ Each direct shop has an independent collection method selector:
 - **Direct request**, **Background Edge**, **Playwright Edge**, and **Browser extension** pin a check to one path for diagnostics or site-specific operation.
 - **Manual only** sends no automated retailer request and reports the check for human review.
 
-The **Test** button beside a shop runs exactly one selected method against one monitoring model. It reports the status, price, duration, method attempts, and protection errors without starting a full monitoring run. Successful automatic checks remember the last working browser strategy for that shop. Marketplace collection currently exposes **Auto** and **Legacy engine**, because its adapters are still hosted by the bundled v3 service.
+The **Test** button beside a shop runs exactly one selected method against one monitoring model. It reports the status, price, duration, method attempts, and protection errors without starting a full monitoring run. Successful automatic checks remember the last working browser strategy for that shop. Kaina24 and Hinnavaatlus still use the bundled legacy marketplace engine. Salidzini uses an assisted Edge collector: it searches the exact model, reads rendered offer cards and selects the lowest exact-model price. A direct Salidzini product URL can optionally be saved per model.
 
 The monitoring table keeps one row per model. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Columns can be shown or hidden from the **Columns** menu; column visibility is retained in the browser. Use **Hard stop** to cancel a stuck run while preserving completed results.
 
 If the Edge extension is connected, protected pages are automatically delegated to a visible normal-browser tab. Without the extension, or when a human verification times out, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually.
 
 Opening a retailer page does not silently change stored monitoring data. The **Action required** dialog provides explicit follow-up actions: **Capture again** after completing browser verification, **Mark not found** after confirming that the model is absent, or **Save manual price** for a confirmed in-stock offer. Manual results immediately update the table and invalidate the previous export so it can be regenerated.
+
+Salidzini uses the same dialog when protection or an unusual result needs review. This closes the source without pretending that merely opening a page changed the result: the operator explicitly confirms absence/price or asks the extension to capture the verified page again. Successful assisted results are cached for 12 hours to reduce repeated requests.
 
 Status badges include hover/focus explanations throughout the catalog, stock table, and monitoring results. Expanded marketplace and shop result cells remain open while the running monitor refreshes the table.
 

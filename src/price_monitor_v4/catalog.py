@@ -121,6 +121,13 @@ class CatalogStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(item_id, shop_key)
                 );
+                CREATE TABLE IF NOT EXISTS item_marketplace_links (
+                    item_id INTEGER NOT NULL REFERENCES catalog_items(id) ON DELETE CASCADE,
+                    marketplace_key TEXT NOT NULL REFERENCES monitoring_sources(key),
+                    product_url TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(item_id, marketplace_key)
+                );
                 CREATE TABLE IF NOT EXISTS monitoring_sessions (
                     run_id TEXT PRIMARY KEY,
                     legacy_started INTEGER NOT NULL,
@@ -147,6 +154,26 @@ class CatalogStore:
                     PRIMARY KEY(run_id, item_id, shop_key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
+                CREATE TABLE IF NOT EXISTS assisted_marketplace_observations (
+                    run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
+                    item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+                    marketplace_key TEXT NOT NULL REFERENCES monitoring_sources(key),
+                    status TEXT NOT NULL,
+                    title TEXT,
+                    seller_name TEXT,
+                    price_eur REAL,
+                    availability TEXT,
+                    product_url TEXT,
+                    search_url TEXT,
+                    error TEXT,
+                    checked_at TEXT,
+                    cached INTEGER NOT NULL DEFAULT 0,
+                    collection_method TEXT,
+                    attempts_json TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY(run_id, item_id, marketplace_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_assisted_marketplace_run
+                    ON assisted_marketplace_observations(run_id, status);
                 CREATE TABLE IF NOT EXISTS shop_protection_state (
                     shop_key TEXT PRIMARY KEY REFERENCES monitoring_sources(key),
                     cooldown_until TEXT NOT NULL,
@@ -259,6 +286,13 @@ class CatalogStore:
                         "SELECT shop_key, product_url FROM item_shop_links WHERE item_id=?", (item["id"],)
                     )
                 }
+                item["marketplace_links"] = {
+                    result["marketplace_key"]: result["product_url"]
+                    for result in db.execute(
+                        "SELECT marketplace_key, product_url FROM item_marketplace_links WHERE item_id=?",
+                        (item["id"],),
+                    )
+                }
         return item
 
     def _replace_shop_links(self, db: sqlite3.Connection, item_id: int, links: dict[str, Any]) -> None:
@@ -270,6 +304,19 @@ class CatalogStore:
             if key in valid_shops and url:
                 db.execute(
                     "INSERT INTO item_shop_links(item_id, shop_key, product_url, updated_at) VALUES(?, ?, ?, ?)",
+                    (item_id, key, url, now),
+                )
+
+    def _replace_marketplace_links(self, db: sqlite3.Connection, item_id: int, links: dict[str, Any]) -> None:
+        valid_marketplaces = {source.key for source in SOURCES if source.kind == "marketplace"}
+        db.execute("DELETE FROM item_marketplace_links WHERE item_id=?", (item_id,))
+        now = utc_now()
+        for key, value in links.items():
+            url = str(value or "").strip()
+            if key in valid_marketplaces and url:
+                db.execute(
+                    "INSERT INTO item_marketplace_links(item_id, marketplace_key, product_url, updated_at) "
+                    "VALUES(?, ?, ?, ?)",
                     (item_id, key, url, now),
                 )
 
@@ -334,6 +381,7 @@ class CatalogStore:
                     (model, canonical, json.dumps(sheets), int(bool(payload.get("paused"))), now, now),
                 )
                 self._replace_shop_links(db, cursor.lastrowid, payload.get("shop_links") or {})
+                self._replace_marketplace_links(db, cursor.lastrowid, payload.get("marketplace_links") or {})
         elif kind == "stock":
             nomenclature = str(payload.get("nomenclature", "")).strip()
             if not nomenclature:
@@ -379,7 +427,8 @@ class CatalogStore:
         if "paused" in payload:
             fields["paused"] = int(bool(payload["paused"]))
         has_shop_links = current["kind"] == "source" and "shop_links" in payload
-        if not fields and not has_shop_links:
+        has_marketplace_links = current["kind"] == "source" and "marketplace_links" in payload
+        if not fields and not has_shop_links and not has_marketplace_links:
             return current
         with self._lock, self.connect() as db:
             if current["kind"] == "source" and "canonical_model" in fields:
@@ -397,6 +446,8 @@ class CatalogStore:
                 db.execute(f"UPDATE catalog_items SET {assignments} WHERE id=?", (*fields.values(), item_id))
             if has_shop_links:
                 self._replace_shop_links(db, item_id, payload.get("shop_links") or {})
+            if has_marketplace_links:
+                self._replace_marketplace_links(db, item_id, payload.get("marketplace_links") or {})
         return self.get_item(item_id)
 
     def trash_item(self, item_id: int) -> dict[str, Any]:
@@ -429,6 +480,7 @@ class CatalogStore:
                 raise KeyError(item_id)
             # Historical observations reference catalog items without ON DELETE CASCADE.
             db.execute("DELETE FROM shop_observations WHERE item_id=?", (item_id,))
+            db.execute("DELETE FROM assisted_marketplace_observations WHERE item_id=?", (item_id,))
             db.execute("DELETE FROM catalog_items WHERE id=?", (item_id,))
 
     def promote_stock_item(self, item_id: int) -> dict[str, Any]:
@@ -891,6 +943,178 @@ class CatalogStore:
             result["cached"] = bool(result.get("cached"))
             result["attempts"] = json.loads(result.pop("attempts_json", "[]") or "[]")
         pending = sum(1 for row in results if row["status"] == "PENDING")
+        return {"status": "RUNNING" if pending else "COMPLETE", "pending": pending, "results": results}
+
+    def start_assisted_marketplace_run(
+        self,
+        run_id: str,
+        models: list[dict[str, Any]],
+        marketplaces: list[dict[str, Any]],
+        cache_ttl_seconds: float = 0,
+    ) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(seconds=max(0, cache_ttl_seconds))).isoformat()
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM assisted_marketplace_observations WHERE run_id=?", (run_id,))
+            for model in models:
+                for marketplace in marketplaces:
+                    cached = None
+                    if cache_ttl_seconds > 0:
+                        cached = db.execute(
+                            "SELECT title,seller_name,price_eur,availability,product_url,search_url,checked_at,"
+                            "collection_method,attempts_json FROM assisted_marketplace_observations "
+                            "WHERE run_id<>? AND item_id=? AND marketplace_key=? AND status='SUCCESS' "
+                            "AND price_eur IS NOT NULL AND checked_at>=? ORDER BY checked_at DESC LIMIT 1",
+                            (run_id, model["id"], marketplace["key"], cutoff),
+                        ).fetchone()
+                    if cached:
+                        db.execute(
+                            "INSERT INTO assisted_marketplace_observations("
+                            "run_id,item_id,marketplace_key,status,title,seller_name,price_eur,availability,"
+                            "product_url,search_url,checked_at,cached,collection_method,attempts_json) "
+                            "VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,?,1,?,?)",
+                            (
+                                run_id, model["id"], marketplace["key"], cached["title"],
+                                cached["seller_name"], cached["price_eur"], cached["availability"],
+                                cached["product_url"], cached["search_url"], cached["checked_at"],
+                                cached["collection_method"], cached["attempts_json"] or "[]",
+                            ),
+                        )
+                    else:
+                        db.execute(
+                            "INSERT INTO assisted_marketplace_observations("
+                            "run_id,item_id,marketplace_key,status) VALUES(?,?,?,'PENDING')",
+                            (run_id, model["id"], marketplace["key"]),
+                        )
+
+    def finish_assisted_marketplace_observation(
+        self,
+        run_id: str,
+        item_id: int,
+        marketplace_key: str,
+        status: str,
+        *,
+        title: str | None = None,
+        seller_name: str | None = None,
+        price_eur: float | None = None,
+        availability: str | None = None,
+        product_url: str | None = None,
+        search_url: str | None = None,
+        error: str | None = None,
+        collection_method: str | None = "extension",
+        attempts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "UPDATE assisted_marketplace_observations SET status=?,title=?,seller_name=?,price_eur=?,"
+                "availability=?,product_url=?,search_url=?,error=?,checked_at=?,cached=0,collection_method=?,"
+                "attempts_json=? WHERE run_id=? AND item_id=? AND marketplace_key=?",
+                (
+                    status, title, seller_name, price_eur, availability, product_url, search_url, error,
+                    utc_now(), collection_method, json.dumps(attempts or [], ensure_ascii=False),
+                    run_id, item_id, marketplace_key,
+                ),
+            )
+
+    def retry_assisted_marketplace_observation(
+        self, run_id: str, item_id: int, marketplace_key: str
+    ) -> None:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE assisted_marketplace_observations SET status='PENDING',title=NULL,seller_name=NULL,"
+                "price_eur=NULL,availability=NULL,product_url=NULL,error=NULL,checked_at=NULL,cached=0,"
+                "collection_method=NULL,attempts_json='[]' WHERE run_id=? AND item_id=? AND marketplace_key=?",
+                (run_id, item_id, marketplace_key),
+            )
+            if not cursor.rowcount:
+                raise KeyError((run_id, item_id, marketplace_key))
+
+    def resolve_assisted_marketplace_observation(
+        self,
+        run_id: str,
+        item_id: int,
+        marketplace_key: str,
+        status: str,
+        *,
+        price_eur: float | None = None,
+        availability: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"NOT_FOUND", "SUCCESS"}:
+            raise ValueError("Manual marketplace status must be NOT_FOUND or SUCCESS")
+        if status == "SUCCESS" and (price_eur is None or price_eur < 0):
+            raise ValueError("A non-negative price is required for manual success")
+        attempts = [{"method": "manual", "result": "CONFIRMED", "duration_ms": 0}]
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE assisted_marketplace_observations SET status=?,seller_name='Manual verification',"
+                "price_eur=?,availability=?,error=NULL,checked_at=?,cached=0,collection_method='manual',"
+                "attempts_json=? WHERE run_id=? AND item_id=? AND marketplace_key=?",
+                (
+                    status, price_eur if status == "SUCCESS" else None,
+                    (availability or "IN_STOCK") if status == "SUCCESS" else None,
+                    utc_now(), json.dumps(attempts), run_id, item_id, marketplace_key,
+                ),
+            )
+            if not cursor.rowcount:
+                raise KeyError((run_id, item_id, marketplace_key))
+            row = db.execute(
+                "SELECT * FROM assisted_marketplace_observations WHERE run_id=? AND item_id=? "
+                "AND marketplace_key=?", (run_id, item_id, marketplace_key),
+            ).fetchone()
+        return dict(row)
+
+    def assisted_marketplace_observation_pending(
+        self, run_id: str, item_id: int, marketplace_key: str
+    ) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status FROM assisted_marketplace_observations WHERE run_id=? AND item_id=? "
+                "AND marketplace_key=?", (run_id, item_id, marketplace_key),
+            ).fetchone()
+        return bool(row and row["status"] == "PENDING")
+
+    def cancel_assisted_marketplace_run(self, run_id: str) -> int:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE assisted_marketplace_observations SET status='INCOMPLETE',"
+                "error='Stopped by user',checked_at=? WHERE run_id=? AND status IN ('PENDING','RUNNING')",
+                (utc_now(), run_id),
+            )
+            return int(cursor.rowcount)
+
+    def assisted_marketplace_run(self, run_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT o.*,i.model,i.canonical_model,s.name marketplace_name,s.country "
+                "FROM assisted_marketplace_observations o JOIN catalog_items i ON i.id=o.item_id "
+                "JOIN monitoring_sources s ON s.key=o.marketplace_key WHERE o.run_id=? "
+                "ORDER BY i.model,s.sort_order", (run_id,),
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            attempt_details = json.loads(item.pop("attempts_json", "[]") or "[]")
+            offer = None
+            if item["status"] == "SUCCESS" and item.get("price_eur") is not None:
+                offer = {
+                    "price_eur": item["price_eur"],
+                    "store": item.get("seller_name") or item["marketplace_name"],
+                    "url": item.get("product_url") or item.get("search_url"),
+                }
+            results.append({
+                **item,
+                "id": f"assisted:{run_id}:{item['item_id']}:{item['marketplace_key']}",
+                "source_model": item["model"],
+                "marketplace": item["marketplace_name"],
+                "matched_title": item.get("title"),
+                "cheapest_in_stock": offer if item.get("availability") != "PRE_ORDER" else None,
+                "cheapest_pre_order": offer if item.get("availability") == "PRE_ORDER" else None,
+                "attempts": len(attempt_details),
+                "attempt_details": attempt_details,
+                "finished_at": item.get("checked_at"),
+                "cached": bool(item.get("cached")),
+                "assisted": True,
+            })
+        pending = sum(1 for item in results if item["status"] == "PENDING")
         return {"status": "RUNNING" if pending else "COMPLETE", "pending": pending, "results": results}
 
     def prepare_legacy(self, original_database: Path, legacy_database: Path, workbook_path: Path) -> None:
