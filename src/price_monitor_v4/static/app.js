@@ -156,7 +156,11 @@ function renderSources() {
   document.querySelectorAll('[data-test-source]').forEach(button => button.addEventListener('click', () => openMethodTest(button.dataset.testSource)));
 }
 
-async function loadSources() { state.sources = await api('/sources'); renderSources(); if (state.tasks.length || state.shopResults.length) renderResults(); }
+async function loadSources() {
+  state.sources = await api('/sources'); renderSources();
+  if (state.currentRunId) await pollRun(state.currentRunId);
+  else if (state.tasks.length || state.shopResults.length) renderResults();
+}
 
 async function loadBrowserBridge() {
   const root = byId('browser-bridge-state');
@@ -292,6 +296,29 @@ function offerLink(offer) {
   return offer.url ? `<a href="${escapeHtml(offer.url)}" target="_blank" rel="noopener">${label}</a>` : label;
 }
 
+function sourceToken(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function marketplaceSourceForTask(task) {
+  const explicitKey = String(task.marketplace_key || '').toLowerCase();
+  const taskToken = sourceToken(task.marketplace);
+  return state.sources.find(source => source.kind === 'marketplace' && (
+    source.key === explicitKey || taskToken.includes(sourceToken(source.key)) || taskToken.includes(sourceToken(source.name))
+  ));
+}
+function marketplaceTaskVisible(task) {
+  const source = marketplaceSourceForTask(task);
+  return !source || source.effective_enabled;
+}
+function shopResultVisible(result) {
+  const source = state.sources.find(item => item.kind === 'shop' && item.key === result.shop_key);
+  return !source || source.effective_enabled;
+}
+function visibleRunResults() {
+  return [
+    ...state.tasks.filter(marketplaceTaskVisible),
+    ...state.shopResults.filter(shopResultVisible)
+  ];
+}
+
 function aggregateResults() {
   const rows = new Map();
   const ensure = (model, canonical = '') => {
@@ -300,10 +327,11 @@ function aggregateResults() {
     return rows.get(key);
   };
   state.tasks.forEach(task => {
-    const row = ensure(task.source_model || task.canonical_model, task.canonical_model); row.tasks.push(task);
+    const row = ensure(task.source_model || task.canonical_model, task.canonical_model);
+    if (marketplaceTaskVisible(task)) row.tasks.push(task);
     if (task.stock_quantity != null) row.stockQuantity = task.stock_quantity; if (task.stock_unit_cost_eur != null) row.stockCost = task.stock_unit_cost_eur;
   });
-  state.shopResults.forEach(result => { ensure(result.model, result.model).shops[result.shop_key] = result; });
+  state.shopResults.filter(shopResultVisible).forEach(result => { ensure(result.model, result.model).shops[result.shop_key] = result; });
   state.sourceOptions.filter(item => !item.paused && item.state !== 'trash').forEach(item => ensure(item.model, item.canonical_model));
   return [...rows.values()].sort((a, b) => a.model.localeCompare(b.model, undefined, { numeric: true }));
 }
@@ -376,9 +404,10 @@ function shopCell(row, shop, openDetails) {
 }
 
 function columns() {
-  const shops = state.sources.filter(item => item.kind === 'shop');
+  const marketplacesEnabled = state.sources.some(item => item.kind === 'marketplace' && item.effective_enabled);
+  const shops = state.sources.filter(item => item.kind === 'shop' && item.effective_enabled);
   return [
-    { key: 'model', label: 'Model' }, { key: 'marketplaces', label: 'Marketplaces' }, { key: 'lowest-stock', label: 'Lowest in-stock' }, { key: 'lowest-preorder', label: 'Lowest pre-order' },
+    { key: 'model', label: 'Model' }, ...(marketplacesEnabled ? [{ key: 'marketplaces', label: 'Marketplaces' }] : []), { key: 'lowest-stock', label: 'Lowest in-stock' }, { key: 'lowest-preorder', label: 'Lowest pre-order' },
     ...shops.map(shop => ({ key: `shop-${shop.key}`, label: shop.name, shop })), { key: 'stock', label: 'Stock' }, { key: 'margin', label: 'Margin' }, { key: 'status', label: 'Status' }
   ];
 }
@@ -392,8 +421,8 @@ function buildResultFilters(rows) {
   const values = {
     model: rows.map(row => ({ value: row.key, label: row.model })),
     status: [...new Set(rows.map(rowStatus))].map(value => ({ value, label: value.replaceAll('_', ' ') })),
-    marketplace: state.sources.filter(item => item.kind === 'marketplace').map(item => ({ value: item.key, label: item.name })),
-    shop: state.sources.filter(item => item.kind === 'shop').map(item => ({ value: item.key, label: item.name }))
+    marketplace: state.sources.filter(item => item.kind === 'marketplace' && item.effective_enabled).map(item => ({ value: item.key, label: item.name })),
+    shop: state.sources.filter(item => item.kind === 'shop' && item.effective_enabled).map(item => ({ value: item.key, label: item.name }))
   };
   for (const [kind, options] of Object.entries(values)) {
     const known = state.resultFilterKnown[kind];
@@ -411,8 +440,8 @@ function buildResultFilters(rows) {
 
 function resultRowVisible(row) {
   if (!state.resultFilters.model.has(row.key) || !state.resultFilters.status.has(rowStatus(row))) return false;
-  const marketplaceKeys = row.tasks.map(task => String(task.marketplace || '').toLowerCase());
-  if (marketplaceKeys.length && ![...state.resultFilters.marketplace].some(key => marketplaceKeys.some(name => name.includes(key)))) return false;
+  const marketplaceKeys = row.tasks.map(task => marketplaceSourceForTask(task)?.key || String(task.marketplace || '').toLowerCase());
+  if (marketplaceKeys.length && !marketplaceKeys.some(key => state.resultFilters.marketplace.has(key))) return false;
   const shopKeys = Object.keys(row.shops);
   if (shopKeys.length && !shopKeys.some(key => state.resultFilters.shop.has(key))) return false;
   return true;
@@ -431,14 +460,16 @@ function renderResults() {
   byId('result-rows').innerHTML = rows.length ? rows.map(row => {
     const stockOffer = lowestOffer(row, 'cheapest_in_stock'); const preorderOffer = lowestOffer(row, 'cheapest_pre_order');
     const best = stockOffer || preorderOffer; const margin = best && row.stockCost != null ? Number(best.price_eur) - Number(row.stockCost) : null;
-    const shopCells = state.sources.filter(item => item.kind === 'shop').map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
-    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell')}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
+    const marketplacesEnabled = state.sources.some(item => item.kind === 'marketplace' && item.effective_enabled);
+    const shopCells = state.sources.filter(item => item.kind === 'shop' && item.effective_enabled).map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
+    const marketplaceResultCell = marketplacesEnabled ? cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell') : '';
+    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', escapeHtml(row.model), 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
 function renderActionRequired(run) {
-  const shopItems = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED').map(item => ({ ...item, action_kind: 'shops', action_key: item.shop_key, action_name: item.shop_name || item.shop_key }));
-  const marketplaceItems = state.tasks.filter(item => item.status === 'ACTION_REQUIRED' && item.assisted).map(item => ({ ...item, model: item.source_model || item.canonical_model, action_kind: 'marketplaces', action_key: item.marketplace_key, action_name: item.marketplace || item.marketplace_key }));
+  const shopItems = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED' && shopResultVisible(item)).map(item => ({ ...item, action_kind: 'shops', action_key: item.shop_key, action_name: item.shop_name || item.shop_key }));
+  const marketplaceItems = state.tasks.filter(item => item.status === 'ACTION_REQUIRED' && item.assisted && marketplaceTaskVisible(item)).map(item => ({ ...item, model: item.source_model || item.canonical_model, action_kind: 'marketplaces', action_key: item.marketplace_key, action_name: item.marketplace || item.marketplace_key }));
   const items = [...shopItems, ...marketplaceItems];
   state.actionItems = items;
   const review = byId('review-actions');
@@ -507,7 +538,7 @@ async function handleActionDialog(event) {
 function renderRun(run) {
   state.currentRunId = run.id || run.run_id;
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
-  const all = [...state.tasks, ...state.shopResults]; const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
+  const all = visibleRunResults(); const finished = all.filter(item => !['RUNNING', 'PENDING'].includes(item.status)).length;
   const success = all.filter(item => item.status === 'SUCCESS').length; const failed = all.filter(item => ['FAILED', 'INCOMPLETE'].includes(item.status)).length;
   const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
   const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
