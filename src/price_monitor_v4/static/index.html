@@ -11,7 +11,7 @@
     <header class="app-header">
       <div>
         <p class="eyebrow">UTC MARKET INTELLIGENCE</p>
-        <h1>Price Monitor <span class="version">v4.2.1</span></h1>
+        <h1>Price Monitor <span class="version">v4.2.2</span></h1>
         <p class="lead">Flexible product, stock and price monitoring in one workspace.</p>
       </div>
       <div id="service-state" class="service-state">Starting services…</div>
@@ -109,6 +109,22 @@
     <p class="muted">Opening a retailer does not change the result by itself. After checking the page, capture it again, mark the model as not found, or save the price manually.</p>
     <div id="action-items" class="action-items"></div>
     <div class="dialog-actions"><button id="action-later" type="button" class="secondary">Later</button></div>
+  </dialog>
+  <dialog id="correction-dialog" class="correction-dialog">
+    <form id="correction-form" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">RESULT CORRECTION</p><h2 id="correction-title">Correct result</h2></div><button id="correction-close" type="button" class="icon-button" aria-label="Close">×</button></div>
+      <input id="correction-kind" type="hidden"><input id="correction-item-id" type="hidden"><input id="correction-source-key" type="hidden">
+      <div id="correction-current" class="decision-summary muted"></div>
+      <div id="correction-previous" class="decision-summary muted"></div>
+      <div class="form-grid correction-fields">
+        <label>Correct price, EUR<input id="correction-price" inputmode="decimal" placeholder="0.00"></label>
+        <label>Availability<select id="correction-availability"><option value="IN_STOCK">In stock</option><option value="PRE_ORDER">Pre-order</option></select></label>
+        <label id="correction-seller-label">Seller / shop<input id="correction-seller" autocomplete="off" placeholder="Seller name"></label>
+        <label id="correction-url-label" class="wide">Product link <span class="muted">(required evidence)</span><input id="correction-url" type="url" placeholder="https://…"></label>
+      </div>
+      <p class="muted">A correction changes this monitoring run and is remembered as the previous manual decision for future runs.</p>
+      <div class="dialog-actions"><button id="correction-not-found" type="button" class="danger-fill">Mark not found</button><button id="correction-cancel" type="button" class="secondary">Cancel</button><button id="correction-save" type="submit">Save corrected price</button></div>
+    </form>
   </dialog>
   <dialog id="method-test-dialog" class="method-test-dialog">
     <div class="dialog-heading"><div><p class="eyebrow">SAFE DIAGNOSTIC</p><h2 id="method-test-title">Test collection method</h2></div><button id="method-test-close" type="button" class="icon-button" aria-label="Close">×</button></div>

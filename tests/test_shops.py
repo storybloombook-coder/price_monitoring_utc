@@ -4,7 +4,7 @@ import json
 import httpx
 
 from price_monitor_v4.browser_bridge import BrowserBridge
-from price_monitor_v4.shops import ActionRequiredError, ShopMonitor, find_product_url, incomplete_catalog_render, parse_product, retry_after_seconds, security_challenge
+from price_monitor_v4.shops import ActionRequiredError, ShopMonitor, elisa_seo_path, find_product_url, incomplete_catalog_render, parse_product, retry_after_seconds, security_challenge
 
 
 def test_product_json_ld_and_search_link_parsing() -> None:
@@ -46,6 +46,29 @@ def test_rendered_candidates_find_exact_product_and_elisa_total_price() -> None:
     assert parsed is not None
     assert parsed["price_eur"] == 199.0
 
+    detail_candidates = [{
+        "text": (
+            'TCL 25" FHD QD-Mini LED Gaming monitor (25G64)\n'
+            "Kuutasu\n5.53 €\nSoodushind\n199 €\n229 €\nOsta välja\n199 €\nHind\n229 €"
+        ),
+        "links": [],
+    }]
+    detail_html = (
+        '<meta property="og:title" content="TCL monitor (25G64)">'
+        '<script id="price-monitor-candidates" type="application/json">'
+        + json.dumps(detail_candidates) + "</script>"
+    )
+    detail = parse_product(
+        detail_html,
+        "https://www.elisa.ee/et/seadmed/eraklient/Monitorid/tcl/25g64",
+        "25G64",
+    )
+    assert detail is not None
+    assert detail["price_eur"] == 199.0
+    assert elisa_seo_path(
+        "https://www.elisa.ee/et/seadmed/eraklient/Monitorid/tcl/25-fhd-monitor-25g64"
+    ) == "tcl/25-fhd-monitor-25g64"
+
 
 def test_search_page_does_not_turn_an_unrelated_price_into_a_product() -> None:
     html = """
@@ -86,7 +109,7 @@ def test_security_challenge_is_reported_as_action_required() -> None:
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> str:
+        async def fetch(self, url: str, model: str = "") -> str:
             return "<title>Just a moment...</title><p>Performing security verification</p>"
 
     async def run() -> tuple:
@@ -117,7 +140,7 @@ def test_edge_extension_completes_protected_search_and_product() -> None:
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("Local CDP fallback must not run while the extension is connected")
 
     async def run() -> tuple:
@@ -174,7 +197,7 @@ def test_rate_limit_honors_retry_after_and_does_not_open_browser() -> None:
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("429 must enter cooldown without another browser request")
 
         async def close(self) -> None:
@@ -210,7 +233,7 @@ def test_direct_only_does_not_fallback_after_protection() -> None:
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("Direct-only mode must not open a browser")
 
     async def run() -> tuple:
@@ -241,7 +264,7 @@ def test_manual_only_sends_no_request_and_does_not_start_protection_cooldown() -
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("Manual-only mode must not open a browser")
 
     async def run() -> tuple:
@@ -269,7 +292,7 @@ def test_manual_discovery_automatically_checks_a_saved_product_link() -> None:
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("A simple saved product page should use the direct path")
 
     async def run() -> tuple:
@@ -307,7 +330,7 @@ def test_pasted_link_returns_to_action_required_without_source_cooldown() -> Non
             self.observation = (args, kwargs)
 
     class Renderer:
-        async def fetch(self, url: str) -> None:
+        async def fetch(self, url: str, model: str = "") -> None:
             raise AssertionError("Pasted links use the bounded direct parser first")
 
     async def run() -> tuple:
@@ -330,6 +353,123 @@ def test_pasted_link_returns_to_action_required_without_source_cooldown() -> Non
     assert args[3] == "ACTION_REQUIRED"
     assert "no exact-model price" in kwargs["error"]
     assert kwargs["retry_after"] is None
+
+
+def test_elisa_empty_direct_search_falls_back_to_rendered_results() -> None:
+    class Store:
+        observation = None
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+        def remember_source_method(self, *args) -> None:
+            return None
+
+        def remember_source_link(self, *args) -> None:
+            return None
+
+    class EdgeRenderer:
+        async def fetch(self, url: str, model: str = "") -> None:
+            raise AssertionError("Playwright should satisfy the rendered search fallback")
+
+    class Playwright:
+        async def fetch(self, url: str, model: str = "") -> tuple[str, str]:
+            return (
+                '<a href="/et/seadmed/eraklient/Monitorid/tcl/25-fhd-monitor-25g64">TCL 25G64</a>',
+                url,
+            )
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        product = (
+            '<script type="application/ld+json">'
+            '{"@type":"Product","name":"TCL 25G64","offers":{"price":"199.00",'
+            '"availability":"https://schema.org/InStock"}}</script>'
+        )
+        def response(request: httpx.Request) -> httpx.Response:
+            if "bySeoURL" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={
+                        "storageCode": "25G64", "model": "TCL 25G64",
+                        "customerPrice": 199, "status": "available",
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                text=product if "/seadmed/" in str(request.url) else "<html><body>Search shell</body></html>",
+                request=request,
+            )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+            await monitor._check_one(
+                client, EdgeRenderer(), "elisa-rendered", {
+                    "id": 14, "model": "25G64", "shop_links": {},
+                }, {"key": "elisa", "collection_method": "auto"}, Playwright(),
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "SUCCESS"
+    assert kwargs["price_eur"] == 199
+    assert [attempt["method"] for attempt in kwargs["attempts"]] == ["direct", "playwright", "direct"]
+
+
+def test_elisa_saved_link_falls_back_to_rendered_product_card() -> None:
+    class Store:
+        observation = None
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+        def remember_source_method(self, *args) -> None:
+            return None
+
+        def remember_source_link(self, *args) -> None:
+            return None
+
+    class EdgeRenderer:
+        async def fetch(self, url: str, model: str = "") -> None:
+            raise AssertionError("Playwright should render the saved Elisa product URL")
+
+    class Playwright:
+        async def fetch(self, url: str, model: str = "") -> tuple[str, str]:
+            candidates = [{
+                "text": "TCL 25G64\nKuutasu\n5.53 €\nSoodushind\n199 €\nHind\n229 €",
+                "links": [],
+            }]
+            return (
+                '<meta property="og:title" content="TCL monitor (25G64)">'
+                '<script id="price-monitor-candidates" type="application/json">'
+                + json.dumps(candidates) + "</script>",
+                url,
+            )
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={}, request=request)
+            if "bySeoURL" in str(request.url)
+            else httpx.Response(200, text="<html><body>Application shell</body></html>", request=request)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, EdgeRenderer(), "elisa-saved", {
+                    "id": 40, "model": "25G64",
+                    "shop_links": {
+                        "elisa": "https://www.elisa.ee/et/seadmed/eraklient/Monitorid/tcl/25g64"
+                    },
+                }, {"key": "elisa", "collection_method": "auto"}, Playwright(),
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "SUCCESS"
+    assert kwargs["price_eur"] == 199
+    assert kwargs["product_url"].endswith("/25g64")
+    assert [attempt["method"] for attempt in kwargs["attempts"]] == ["direct", "playwright"]
 
 
 def test_shop_run_never_overlaps_requests_to_the_same_domain() -> None:

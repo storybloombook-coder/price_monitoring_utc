@@ -175,6 +175,22 @@ class CatalogStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_assisted_marketplace_run
                     ON assisted_marketplace_observations(run_id, status);
+                CREATE TABLE IF NOT EXISTS manual_resolutions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
+                    item_id INTEGER NOT NULL REFERENCES catalog_items(id) ON DELETE CASCADE,
+                    source_kind TEXT NOT NULL CHECK(source_kind IN ('shop', 'marketplace')),
+                    source_key TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('SUCCESS', 'NOT_FOUND')),
+                    price_eur REAL,
+                    availability TEXT,
+                    seller_name TEXT,
+                    product_url TEXT,
+                    decided_at TEXT NOT NULL,
+                    UNIQUE(run_id, item_id, source_kind, source_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_resolutions_previous
+                    ON manual_resolutions(item_id, source_kind, source_key, decided_at DESC);
                 CREATE TABLE IF NOT EXISTS shop_protection_state (
                     shop_key TEXT PRIMARY KEY REFERENCES monitoring_sources(key),
                     cooldown_until TEXT NOT NULL,
@@ -215,6 +231,23 @@ class CatalogStore:
                     "kind=excluded.kind, country=excluded.country, base_url=excluded.base_url, sort_order=excluded.sort_order",
                     (source.key, source.name, source.kind, source.country, source.base_url, order),
                 )
+            # Preserve manual decisions made before the durable history table existed.
+            db.execute(
+                "INSERT OR IGNORE INTO manual_resolutions(run_id,item_id,source_kind,source_key,status,"
+                "price_eur,availability,product_url,decided_at) "
+                "SELECT run_id,item_id,'shop',shop_key,status,price_eur,availability,"
+                "COALESCE(product_url,search_url),checked_at FROM shop_observations "
+                "WHERE collection_method='manual' AND status IN ('SUCCESS','NOT_FOUND') "
+                "AND checked_at IS NOT NULL"
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO manual_resolutions(run_id,item_id,source_kind,source_key,status,"
+                "price_eur,availability,seller_name,product_url,decided_at) "
+                "SELECT run_id,item_id,'marketplace',marketplace_key,status,price_eur,availability,"
+                "seller_name,COALESCE(product_url,search_url),checked_at "
+                "FROM assisted_marketplace_observations WHERE collection_method='manual' "
+                "AND status IN ('SUCCESS','NOT_FOUND') AND checked_at IS NOT NULL"
+            )
 
     def _set_meta(self, db: sqlite3.Connection, key: str, value: Any) -> None:
         db.execute(
@@ -760,6 +793,99 @@ class CatalogStore:
                 raise KeyError(run_id)
             db.execute("DELETE FROM shop_observations WHERE run_id=?", (run_id,))
             db.execute("DELETE FROM assisted_marketplace_observations WHERE run_id=?", (run_id,))
+            db.execute("DELETE FROM manual_resolutions WHERE run_id=?", (run_id,))
+
+    @staticmethod
+    def _record_manual_resolution(
+        db: sqlite3.Connection,
+        run_id: str,
+        item_id: int,
+        source_kind: str,
+        source_key: str,
+        status: str,
+        *,
+        price_eur: float | None = None,
+        availability: str | None = None,
+        seller_name: str | None = None,
+        product_url: str | None = None,
+        decided_at: str | None = None,
+    ) -> None:
+        db.execute(
+            "INSERT INTO manual_resolutions(run_id,item_id,source_kind,source_key,status,price_eur,"
+            "availability,seller_name,product_url,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id,item_id,source_kind,source_key) DO UPDATE SET "
+            "status=excluded.status,price_eur=excluded.price_eur,availability=excluded.availability,"
+            "seller_name=excluded.seller_name,product_url=excluded.product_url,decided_at=excluded.decided_at",
+            (
+                run_id, item_id, source_kind, source_key, status,
+                price_eur if status == "SUCCESS" else None,
+                availability if status == "SUCCESS" else None,
+                seller_name if status == "SUCCESS" else None,
+                product_url, decided_at or utc_now(),
+            ),
+        )
+
+    def manual_resolution(
+        self, run_id: str, item_id: int, source_kind: str, source_key: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status,price_eur,availability,seller_name,product_url,decided_at "
+                "FROM manual_resolutions WHERE run_id=? AND item_id=? AND source_kind=? AND source_key=?",
+                (run_id, item_id, source_kind, source_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def previous_manual_resolution(
+        self, run_id: str, item_id: int, source_kind: str, source_key: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status,price_eur,availability,seller_name,product_url,decided_at "
+                "FROM manual_resolutions WHERE run_id<>? AND item_id=? AND source_kind=? "
+                "AND source_key=? ORDER BY decided_at DESC LIMIT 1",
+                (run_id, item_id, source_kind, source_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def resolve_marketplace_result(
+        self,
+        run_id: str,
+        item_id: int,
+        marketplace_key: str,
+        status: str,
+        *,
+        price_eur: float | None = None,
+        availability: str | None = None,
+        seller_name: str | None = None,
+        product_url: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"NOT_FOUND", "SUCCESS"}:
+            raise ValueError("Manual marketplace status must be NOT_FOUND or SUCCESS")
+        if status == "SUCCESS" and (price_eur is None or price_eur < 0):
+            raise ValueError("A non-negative price is required for manual success")
+        if status == "SUCCESS" and not str(product_url or "").strip():
+            raise ValueError("A product link is required for a corrected marketplace price")
+        self.get_item(item_id)
+        if not self.monitoring_session(run_id):
+            raise KeyError(run_id)
+        source = next(
+            (item for item in self.list_sources() if item["key"] == marketplace_key and item["kind"] == "marketplace"),
+            None,
+        )
+        if not source:
+            raise KeyError(marketplace_key)
+        decided_at = utc_now()
+        with self._lock, self.connect() as db:
+            self._record_manual_resolution(
+                db, run_id, item_id, "marketplace", marketplace_key, status,
+                price_eur=price_eur,
+                availability=availability or "IN_STOCK",
+                seller_name=str(seller_name or "").strip() or source["name"],
+                product_url=str(product_url or "").strip() or None,
+                decided_at=decided_at,
+            )
+        return self.manual_resolution(run_id, item_id, "marketplace", marketplace_key) or {}
 
     def monitoring_session(self, run_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -924,6 +1050,7 @@ class CatalogStore:
         if status == "SUCCESS" and (price_eur is None or price_eur < 0):
             raise ValueError("A non-negative price is required for manual success")
         attempt = [{"method": "manual", "result": "CONFIRMED", "duration_ms": 0}]
+        decided_at = utc_now()
         with self._lock, self.connect() as db:
             current = db.execute(
                 "SELECT product_url,search_url FROM shop_observations "
@@ -940,12 +1067,19 @@ class CatalogStore:
                     status,
                     price_eur if status == "SUCCESS" else None,
                     (availability or "IN_STOCK") if status == "SUCCESS" else None,
-                    utc_now(),
+                    decided_at,
                     json.dumps(attempt),
                     run_id,
                     item_id,
                     shop_key,
                 ),
+            )
+            self._record_manual_resolution(
+                db, run_id, item_id, "shop", shop_key, status,
+                price_eur=price_eur,
+                availability=availability or "IN_STOCK",
+                product_url=current["product_url"] or current["search_url"],
+                decided_at=decided_at,
             )
             row = db.execute(
                 "SELECT * FROM shop_observations WHERE run_id=? AND item_id=? AND shop_key=?",
@@ -1136,7 +1270,15 @@ class CatalogStore:
         if status == "SUCCESS" and (price_eur is None or price_eur < 0):
             raise ValueError("A non-negative price is required for manual success")
         attempts = [{"method": "manual", "result": "CONFIRMED", "duration_ms": 0}]
+        decided_at = utc_now()
         with self._lock, self.connect() as db:
+            current = db.execute(
+                "SELECT product_url,search_url FROM assisted_marketplace_observations "
+                "WHERE run_id=? AND item_id=? AND marketplace_key=?",
+                (run_id, item_id, marketplace_key),
+            ).fetchone()
+            if not current:
+                raise KeyError((run_id, item_id, marketplace_key))
             cursor = db.execute(
                 "UPDATE assisted_marketplace_observations SET status=?,seller_name=?,"
                 "price_eur=?,availability=?,error=NULL,checked_at=?,cached=0,collection_method='manual',"
@@ -1145,11 +1287,19 @@ class CatalogStore:
                     status, (str(seller_name or "").strip() or "Manual verification") if status == "SUCCESS" else None,
                     price_eur if status == "SUCCESS" else None,
                     (availability or "IN_STOCK") if status == "SUCCESS" else None,
-                    utc_now(), json.dumps(attempts), run_id, item_id, marketplace_key,
+                    decided_at, json.dumps(attempts), run_id, item_id, marketplace_key,
                 ),
             )
             if not cursor.rowcount:
                 raise KeyError((run_id, item_id, marketplace_key))
+            self._record_manual_resolution(
+                db, run_id, item_id, "marketplace", marketplace_key, status,
+                price_eur=price_eur,
+                availability=availability or "IN_STOCK",
+                seller_name=str(seller_name or "").strip() or "Manual verification",
+                product_url=current["product_url"] or current["search_url"],
+                decided_at=decided_at,
+            )
             row = db.execute(
                 "SELECT * FROM assisted_marketplace_observations WHERE run_id=? AND item_id=? "
                 "AND marketplace_key=?", (run_id, item_id, marketplace_key),

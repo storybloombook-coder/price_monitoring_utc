@@ -112,7 +112,7 @@ class AssistedMarketplaceMonitor:
         store: CatalogStore,
         browser_bridge: BrowserBridge,
         *,
-        cache_ttl_seconds: float = 43_200,
+        cache_ttl_seconds: float = 14_400,
         request_delay_seconds: float = 3,
     ) -> None:
         self.store = store
@@ -133,8 +133,31 @@ class AssistedMarketplaceMonitor:
         self.store.start_assisted_marketplace_run(
             run_id, models, marketplaces, self.cache_ttl_seconds
         )
-        if models and marketplaces:
-            self._tasks[run_id] = asyncio.create_task(self._run(run_id, models, marketplaces))
+        # Salidzini commonly starts with hCaptcha. Do not hide the manual workflow
+        # behind the full extension timeout: fresh uncached checks are immediately
+        # ready for a manual price/not-found decision. Capture again remains an
+        # explicit browser-assisted option.
+        for marketplace in marketplaces:
+            for model in models:
+                self._mark_manual_required(run_id, model, marketplace)
+
+    def _mark_manual_required(
+        self, run_id: str, model: dict[str, Any], marketplace: dict[str, Any]
+    ) -> bool:
+        key = marketplace["key"]
+        if not self.store.assisted_marketplace_observation_pending(run_id, model["id"], key):
+            return False
+        source = SOURCE_BY_KEY[key]
+        manual_url = (model.get("marketplace_links") or {}).get(key)
+        self.store.finish_assisted_marketplace_observation(
+            run_id, model["id"], key, "ACTION_REQUIRED",
+            product_url=manual_url,
+            search_url=source.search_url(model["model"]),
+            error="Manual verification is ready; enter the price and seller, mark not found, or use Capture again",
+            collection_method="manual",
+            attempts=[],
+        )
+        return True
 
     async def _run(
         self, run_id: str, models: list[dict[str, Any]], marketplaces: list[dict[str, Any]]
@@ -251,11 +274,13 @@ class AssistedMarketplaceMonitor:
         ]
         started = 0
         for marketplace in marketplaces:
-            try:
-                self.retry(run_id, item_id, marketplace["key"])
-                started += 1
-            except ValueError:
+            task_key = f"retry:{run_id}:{item_id}:{marketplace['key']}"
+            if task_key in self._tasks:
                 continue
+            self.store.ensure_assisted_marketplace_observation(run_id, item_id, marketplace["key"])
+            self.store.retry_assisted_marketplace_observation(run_id, item_id, marketplace["key"])
+            if self._mark_manual_required(run_id, model, marketplace):
+                started += 1
         return started
 
     async def cancel_run(self, run_id: str) -> int:

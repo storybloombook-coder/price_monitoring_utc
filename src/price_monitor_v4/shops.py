@@ -38,6 +38,49 @@ CANDIDATE_RE = re.compile(
     r'<script[^>]+id=["\']price-monitor-candidates["\'][^>]*>(.*?)</script>',
     re.IGNORECASE | re.DOTALL,
 )
+DYNAMIC_SEARCH_SHOPS = {"elisa"}
+
+RENDERED_CAPTURE_JAVASCRIPT = r"""
+(model) => {
+  const bodyText = String(document.body?.innerText || '').slice(0, 750000);
+  const expected = String(model || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hasPrice = value => /(?:\d[\d\s.,]{0,14})\s*(?:€|EUR)(?!\w)/i.test(String(value || ''));
+  const escapeHtml = value => String(value || '')
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  const metadata = [...document.querySelectorAll('meta, script[type="application/ld+json"]')]
+    .map(element => element.outerHTML)
+    .join('\n');
+  const links = [...document.querySelectorAll('a[href]')]
+    .filter(anchor => normalize(`${anchor.textContent || ''} ${anchor.href || ''}`).includes(expected))
+    .slice(0, 400)
+    .map(anchor => `<a href="${String(anchor.href || '').replaceAll('&', '&amp;').replaceAll('"', '&quot;')}">${escapeHtml(anchor.textContent)}</a>`)
+    .join('\n');
+  const rawCandidates = [...document.querySelectorAll(
+    'article, li, tr, [class*="product"], [class*="offer"], [class*="item"], div'
+  )]
+    .slice(0, 20000)
+    .map(element => ({ element, text: String(element.innerText || '').trim() }))
+    .filter(candidate => candidate.text.length >= 8 && candidate.text.length <= 3000
+      && hasPrice(candidate.text) && normalize(candidate.text).includes(expected))
+    .sort((left, right) => left.text.length - right.text.length);
+  const selectedCandidates = [];
+  for (const candidate of rawCandidates) {
+    if (selectedCandidates.some(selected => candidate.element.contains(selected.element))) continue;
+    if (selectedCandidates.some(selected => selected.text === candidate.text)) continue;
+    selectedCandidates.push(candidate);
+    if (selectedCandidates.length >= 100) break;
+  }
+  const candidateData = selectedCandidates.map(candidate => ({
+    text: candidate.text,
+    links: [...candidate.element.querySelectorAll('a[href]')].slice(0, 20).map(anchor => ({
+      text: String(anchor.textContent || '').trim(), url: anchor.href
+    }))
+  }));
+  const candidateJson = JSON.stringify(candidateData).replaceAll('<', '\\u003c');
+  return `<html><head>${metadata}<script id="price-monitor-candidates" type="application/json">${candidateJson}</script></head><body>${links}<pre>${escapeHtml(bodyText)}</pre></body></html>`;
+}
+"""
 
 
 class ActionRequiredError(ValueError):
@@ -185,6 +228,17 @@ def is_search_listing_url(value: str) -> bool:
     ))
 
 
+def elisa_seo_path(value: str) -> str | None:
+    parsed = urlparse(value or "")
+    if parsed.netloc.lower() not in {"elisa.ee", "www.elisa.ee"} or is_search_listing_url(value):
+        return None
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    vendor, slug = parts[-2:]
+    return f"{vendor}/{slug}" if vendor and slug else None
+
+
 def exact_model_match(expected: str, *values: Any) -> bool:
     return bool(expected and any(
         expected in canonicalize(str(value or "")).replace(" ", "") for value in values
@@ -255,7 +309,8 @@ def parse_product(html: str, url: str, model: str) -> dict[str, Any] | None:
             continue
         # Elisa exposes the monthly instalment before the actual product total.
         total_match = re.search(
-            r"(?:toote\s+hind|total\s+price)\s*[:\-]?\s*" + MONEY_RE.pattern,
+            r"(?:soodushind|osta\s+välja|toote\s+hind|total\s+price|cash\s+price)"
+            r"\s*[:\-]?\s*" + MONEY_RE.pattern,
             text, re.IGNORECASE,
         )
         price_match = total_match or MONEY_RE.search(text)
@@ -403,7 +458,7 @@ class EdgeRenderer:
             await asyncio.sleep(0.1)
         return False
 
-    async def fetch(self, url: str) -> str | None:
+    async def fetch(self, url: str, model: str = "") -> str | None:
         if not await self.start() or not self.port:
             return None
         api_root = f"http://127.0.0.1:{self.port}"
@@ -419,10 +474,11 @@ class EdgeRenderer:
                 # The shops render their catalog client-side after the initial load.
                 await asyncio.sleep(6)
                 command_id = 1
+                expression = f"({RENDERED_CAPTURE_JAVASCRIPT})({json.dumps(model)})"
                 await socket.send(json.dumps({
                     "id": command_id,
                     "method": "Runtime.evaluate",
-                    "params": {"expression": "document.documentElement.outerHTML", "returnByValue": True},
+                    "params": {"expression": expression, "returnByValue": True},
                 }))
                 while True:
                     message = json.loads(await asyncio.wait_for(socket.recv(), timeout=max(10.0, self.timeout_seconds)))
@@ -482,7 +538,7 @@ class PlaywrightRenderer:
             self.context = None
             return False
 
-    async def fetch(self, url: str) -> tuple[str, str] | None:
+    async def fetch(self, url: str, model: str = "") -> tuple[str, str] | None:
         if not await self.start() or not self.context:
             return None
         page = await self.context.new_page()
@@ -492,7 +548,26 @@ class PlaywrightRenderer:
                 await page.wait_for_load_state("networkidle", timeout=min(8000, int(self.timeout_seconds * 1000)))
             except Exception:
                 pass
-            return await page.content(), page.url
+            try:
+                # Elisa and similar storefronts finish their Angular product card
+                # after network-idle. Wait for visible exact-model price evidence,
+                # otherwise page.content() captures only the empty application shell.
+                await page.wait_for_function(
+                    r"""
+                    model => {
+                      const normalize = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                      const text = String(document.body?.innerText || '');
+                      return normalize(text).includes(normalize(model))
+                        && /(?:\d[\d\s.,]{0,14})\s*(?:€|EUR)(?!\w)/i.test(text);
+                    }
+                    """,
+                    model,
+                    timeout=min(12_000, int(self.timeout_seconds * 1000)),
+                )
+            except Exception:
+                pass
+            captured = await page.evaluate(RENDERED_CAPTURE_JAVASCRIPT, model)
+            return str(captured), page.url
         except Exception:
             return None
         finally:
@@ -654,7 +729,7 @@ class ShopMonitor:
                 async with self._browser_semaphore:
                     if shop["key"] in self._browser_blocked:
                         raise ProtectionBlockedError("Background Edge was already blocked for this shop during this run")
-                    rendered = await renderer.fetch(url)
+                    rendered = await renderer.fetch(url, model["model"])
                     if not rendered or security_challenge(rendered) or incomplete_catalog_render(rendered):
                         self._browser_blocked.add(shop["key"])
                         raise ProtectionBlockedError("Background Edge was blocked or could not render the retailer page")
@@ -664,7 +739,7 @@ class ShopMonitor:
                 if not playwright_renderer:
                     raise CollectionMethodUnavailable("Playwright Edge is unavailable")
                 async with self._browser_semaphore:
-                    rendered = await playwright_renderer.fetch(url)
+                    rendered = await playwright_renderer.fetch(url, model["model"])
                 if not rendered:
                     raise CollectionMethodUnavailable("Playwright Edge could not open the retailer page")
                 html, resolved = rendered
@@ -673,7 +748,15 @@ class ShopMonitor:
                 return html, resolved
 
             async def fetch_direct(url: str) -> tuple[str, str]:
-                response = await client.get(url)
+                seo_path = elisa_seo_path(url) if shop["key"] == "elisa" else None
+                if seo_path:
+                    response = await client.post(
+                        "https://www.elisa.ee/publicrest/manager/devices/bySeoURL/private",
+                        content=seo_path,
+                        headers={"Content-Type": "text/plain"},
+                    )
+                else:
+                    response = await client.get(url)
                 if response.status_code == 429:
                     delay = retry_after_seconds(response.headers.get("retry-after"), self.cooldown_seconds)
                     raise ProtectionBlockedError(
@@ -682,6 +765,38 @@ class ShopMonitor:
                 if response.status_code == 403:
                     raise ProtectionBlockedError("The direct request was rejected by retailer protection")
                 response.raise_for_status()
+                if seo_path:
+                    try:
+                        data = response.json()
+                    except ValueError as error:
+                        raise RenderRequiredError("Elisa returned an unreadable product response") from error
+                    expected = canonicalize(model["model"]).replace(" ", "")
+                    if not exact_model_match(
+                        expected, data.get("storageCode"), data.get("model"), data.get("seoURL")
+                    ):
+                        raise RenderRequiredError("Elisa did not return the exact product")
+                    raw_price = data.get("customerPrice")
+                    if raw_price is None:
+                        raw_price = data.get("price")
+                    price = normalize_price(raw_price)
+                    if price is None:
+                        raise RenderRequiredError("Elisa did not return a product price")
+                    product = {
+                        "@type": "Product",
+                        "name": data.get("model") or model["model"],
+                        "sku": data.get("storageCode") or model["model"],
+                        "offers": {
+                            "price": price,
+                            "availability": data.get("status") or "available",
+                            "url": url,
+                        },
+                    }
+                    rendered = (
+                        '<script type="application/ld+json">'
+                        + json.dumps(product, ensure_ascii=False)
+                        + "</script>"
+                    )
+                    return rendered, url
                 html = response.text
                 if response.headers.get("cf-mitigated", "").lower() == "challenge" or security_challenge(html):
                     raise ProtectionBlockedError("The direct request reached a retailer security challenge")
@@ -695,6 +810,24 @@ class ShopMonitor:
                 "playwright": fetch_from_playwright,
                 "extension": fetch_from_extension,
             }
+
+            async def fetch_browser_fallback(url: str) -> tuple[str, str]:
+                preferred = str(shop.get("last_success_method") or "")
+                browser_order = [preferred] if preferred in {"playwright", "background"} else []
+                browser_order.extend(
+                    method for method in ("playwright", "background") if method not in browser_order
+                )
+                last_error: Exception | None = None
+                for method in browser_order:
+                    try:
+                        return await attempted(method, lambda method=method: methods[method](url))
+                    except (ProtectionBlockedError, CollectionMethodUnavailable, OSError) as error:
+                        last_error = error
+                if self.browser_bridge and self.browser_bridge.connected:
+                    return await attempted("extension", lambda: fetch_from_extension(url))
+                raise ActionRequiredError(
+                    "Browser rendering did not complete and the Edge extension is not connected"
+                ) from last_error
 
             async def fetch(url: str) -> tuple[str, str]:
                 # Manual discovery does not generate blind searches. Once the user has
@@ -720,20 +853,7 @@ class ShopMonitor:
                         "Retailer protection blocked direct collection and the Edge extension is not connected"
                     ) from direct_error
                 except (RenderRequiredError, httpx.HTTPError, CollectionMethodUnavailable):
-                    preferred = str(shop.get("last_success_method") or "")
-                    browser_order = [preferred] if preferred in {"playwright", "background"} else []
-                    browser_order.extend(method for method in ("playwright", "background") if method not in browser_order)
-                    last_error: Exception | None = None
-                    for method in browser_order:
-                        try:
-                            return await attempted(method, lambda method=method: methods[method](url))
-                        except (ProtectionBlockedError, CollectionMethodUnavailable, OSError) as error:
-                            last_error = error
-                    if self.browser_bridge and self.browser_bridge.connected:
-                        return await attempted("extension", lambda: fetch_from_extension(url))
-                    raise ActionRequiredError(
-                        "Browser rendering did not complete and the Edge extension is not connected"
-                    ) from last_error
+                    return await fetch_browser_fallback(url)
 
             parsed = None
             product_url = ""
@@ -742,6 +862,15 @@ class ShopMonitor:
                     html, resolved_url = await fetch(manual_url)
                     product_url = resolved_url
                     parsed = parse_product(html, resolved_url, model["model"])
+                    if (
+                        not parsed
+                        and selected_method in {"auto", "manual"}
+                        and used_method == "direct"
+                        and shop["key"] in DYNAMIC_SEARCH_SHOPS
+                    ):
+                        html, resolved_url = await fetch_browser_fallback(manual_url)
+                        product_url = resolved_url
+                        parsed = parse_product(html, resolved_url, model["model"])
                     if not parsed:
                         discovered_url = find_product_url(html, resolved_url, model["model"])
                         if discovered_url and discovered_url != resolved_url:
@@ -760,6 +889,16 @@ class ShopMonitor:
             if not parsed and not link_only and search_url and search_url != manual_url:
                 search_html, search_resolved_url = await fetch(search_url)
                 product_url = find_product_url(search_html, search_resolved_url, model["model"]) or ""
+                if (
+                    not product_url
+                    and selected_method == "auto"
+                    and used_method == "direct"
+                    and shop["key"] in DYNAMIC_SEARCH_SHOPS
+                ):
+                    search_html, search_resolved_url = await fetch_browser_fallback(search_url)
+                    product_url = find_product_url(
+                        search_html, search_resolved_url, model["model"]
+                    ) or ""
                 if product_url:
                     product_html, product_resolved_url = await fetch(product_url)
                     parsed = parse_product(product_html, product_resolved_url, model["model"])

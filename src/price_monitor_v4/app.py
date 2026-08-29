@@ -48,6 +48,9 @@ def normalized_resource_url(value: str | None) -> tuple[str, str, str, str] | No
 def normalize_marketplace_task(task: dict[str, Any]) -> dict[str, Any]:
     """SUCCESS means that the UI can show both a price and a usable offer link."""
     result = dict(task)
+    # The bundled v3 engine uses cheapest_preorder; v4 uses cheapest_pre_order.
+    if not result.get("cheapest_pre_order") and result.get("cheapest_preorder"):
+        result["cheapest_pre_order"] = result["cheapest_preorder"]
     for field in ("cheapest_in_stock", "cheapest_pre_order"):
         if isinstance(result.get(field), dict):
             result[field] = dict(result[field])
@@ -71,6 +74,34 @@ def normalize_marketplace_task(task: dict[str, Any]) -> dict[str, Any]:
     if not primary.get("url"):
         result["status"] = "INCOMPLETE"
         result["error"] = result.get("error") or "The priced offer did not include a usable link"
+    return result
+
+
+def apply_marketplace_resolution(
+    task: dict[str, Any], resolution: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(task)
+    result["manual_resolution"] = dict(resolution)
+    result["status"] = resolution["status"]
+    result["error"] = None
+    result["collection_method"] = "manual"
+    result["finished_at"] = resolution.get("decided_at")
+    if resolution["status"] == "NOT_FOUND":
+        result["cheapest_in_stock"] = None
+        result["cheapest_pre_order"] = None
+        return result
+    existing = result.get("cheapest_in_stock") or result.get("cheapest_pre_order") or {}
+    offer = {
+        "price_eur": resolution.get("price_eur"),
+        "store": resolution.get("seller_name") or existing.get("store") or result.get("marketplace"),
+        "url": resolution.get("product_url") or existing.get("url") or result.get("product_url"),
+    }
+    if resolution.get("availability") == "PRE_ORDER":
+        result["cheapest_in_stock"] = None
+        result["cheapest_pre_order"] = offer
+    else:
+        result["cheapest_in_stock"] = offer
+        result["cheapest_pre_order"] = None
     return result
 
 
@@ -118,7 +149,7 @@ def create_app(
         catalog,
         browser_bridge,
         cache_ttl_seconds=float(
-            app_settings.env.get("ASSISTED_MARKETPLACE_CACHE_TTL_SECONDS", "43200")
+            app_settings.env.get("ASSISTED_MARKETPLACE_CACHE_TTL_SECONDS", "14400")
         ),
         request_delay_seconds=float(
             app_settings.env.get("ASSISTED_MARKETPLACE_DELAY_SECONDS", "3")
@@ -541,25 +572,51 @@ def create_app(
             for item in active_items
         }
         marketplace_sources = [source for source in catalog.list_sources() if source["kind"] == "marketplace"]
-        for task in run["tasks"]:
+        for index, task in enumerate(run["tasks"]):
             item = item_by_model.get(canonicalize(str(
                 task.get("canonical_model") or task.get("source_model") or ""
             )))
             if item:
                 task.setdefault("item_id", item["id"])
-            if task.get("assisted") or task.get("status") != "SUCCESS" or not item:
+            if not item:
                 continue
             marketplace_name = str(task.get("marketplace") or "")
             source = next(
-                (entry for entry in marketplace_sources if marketplace_allowed(marketplace_name, [entry["key"]])),
+                (
+                    entry for entry in marketplace_sources
+                    if entry["key"] == task.get("marketplace_key")
+                    or marketplace_allowed(marketplace_name, [entry["key"]])
+                ),
                 None,
             )
+            if not source:
+                continue
+            task["marketplace_key"] = source["key"]
+            current_resolution = catalog.manual_resolution(
+                run_id, item["id"], "marketplace", source["key"]
+            )
+            if current_resolution:
+                task = normalize_marketplace_task(
+                    apply_marketplace_resolution(task, current_resolution)
+                )
+                run["tasks"][index] = task
+            task["previous_manual_resolution"] = catalog.previous_manual_resolution(
+                run_id, item["id"], "marketplace", source["key"]
+            )
             offer = task.get("cheapest_in_stock") or task.get("cheapest_pre_order") or {}
-            if source and offer.get("url"):
-                task["marketplace_key"] = source["key"]
+            if task.get("status") == "SUCCESS" and offer.get("url"):
                 catalog.remember_source_link(item["id"], source["key"], str(offer["url"]))
         shop = catalog.shop_run(run_id)
-        run["shop_results"] = [normalize_shop_result(result) for result in shop["results"]]
+        run["shop_results"] = []
+        for result in shop["results"]:
+            normalized = normalize_shop_result(result)
+            normalized["manual_resolution"] = catalog.manual_resolution(
+                run_id, result["item_id"], "shop", result["shop_key"]
+            )
+            normalized["previous_manual_resolution"] = catalog.previous_manual_resolution(
+                run_id, result["item_id"], "shop", result["shop_key"]
+            )
+            run["shop_results"].append(normalized)
         if session.get("stopped_at"):
             run["status"] = "INCOMPLETE"
         elif (
@@ -752,15 +809,24 @@ def create_app(
         try:
             status = str(payload.get("status") or "").upper()
             price = payload.get("price_eur")
-            result = catalog.resolve_assisted_marketplace_observation(
-                run_id,
-                item_id,
-                marketplace_key,
-                status,
-                price_eur=float(price) if price not in (None, "") else None,
-                availability=str(payload.get("availability") or "IN_STOCK"),
-                seller_name=str(payload.get("seller_name") or "").strip() or None,
-            )
+            product_url = None
+            if str(payload.get("product_url") or "").strip():
+                product_url = validated_source_url(marketplace_key, payload.get("product_url"))
+                catalog.remember_source_link(item_id, marketplace_key, product_url)
+            values = {
+                "price_eur": float(price) if price not in (None, "") else None,
+                "availability": str(payload.get("availability") or "IN_STOCK"),
+                "seller_name": str(payload.get("seller_name") or "").strip() or None,
+            }
+            if marketplace_key in assisted_marketplace_monitor.supported_keys:
+                result = catalog.resolve_assisted_marketplace_observation(
+                    run_id, item_id, marketplace_key, status, **values
+                )
+            else:
+                result = catalog.resolve_marketplace_result(
+                    run_id, item_id, marketplace_key, status,
+                    product_url=product_url, **values,
+                )
         except KeyError as error:
             raise HTTPException(404, "Assisted marketplace observation not found") from error
         except (TypeError, ValueError) as error:

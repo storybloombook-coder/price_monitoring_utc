@@ -181,6 +181,38 @@ def test_action_required_shop_observation_can_be_retried(tmp_path: Path) -> None
     assert resolved["attempts"][0]["result"] == "CONFIRMED"
 
 
+def test_manual_decision_history_and_legacy_marketplace_correction(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "25G64"})
+    varle = next(item for item in store.list_sources() if item["key"] == "varle")
+    store.register_monitoring_session("manual-old", False, ["hinnavaatlus"])
+    store.start_shop_run("manual-old", [source], [varle])
+    store.finish_shop_observation(
+        "manual-old", source["id"], "varle", "ACTION_REQUIRED",
+        search_url="https://www.varle.lt/search/?q=25G64",
+    )
+    store.resolve_shop_observation(
+        "manual-old", source["id"], "varle", "SUCCESS", price_eur=199,
+    )
+
+    store.register_monitoring_session("manual-new", False, ["hinnavaatlus"])
+    store.start_shop_run("manual-new", [source], [varle])
+    previous = store.previous_manual_resolution(
+        "manual-new", source["id"], "shop", "varle"
+    )
+    assert previous["status"] == "SUCCESS"
+    assert previous["price_eur"] == 199
+    assert previous["decided_at"]
+
+    corrected = store.resolve_marketplace_result(
+        "manual-new", source["id"], "hinnavaatlus", "NOT_FOUND"
+    )
+    assert corrected["status"] == "NOT_FOUND"
+    assert store.manual_resolution(
+        "manual-new", source["id"], "marketplace", "hinnavaatlus"
+    )["status"] == "NOT_FOUND"
+
+
 def test_hard_stop_finalizes_shop_and_legacy_work(tmp_path: Path) -> None:
     store = CatalogStore(tmp_path / "catalog.sqlite3")
     source = store.create_item("source", {"model": "55T7B"})

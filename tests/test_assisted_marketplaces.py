@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from price_monitor_v4.assisted_marketplaces import parse_salidzini_capture
+from price_monitor_v4.assisted_marketplaces import AssistedMarketplaceMonitor, parse_salidzini_capture
+from price_monitor_v4.browser_bridge import BrowserBridge
 from price_monitor_v4.catalog import CatalogStore
 
 
@@ -60,3 +61,18 @@ def test_assisted_marketplace_manual_result_and_link_are_persisted(tmp_path: Pat
     assert result["collection_method"] == "manual"
     assert result["assisted"] is True
     assert result["cheapest_in_stock"]["store"] == "RD Electronics"
+
+
+def test_salidzini_initial_run_requests_manual_input_immediately(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "25G64"})
+    store.register_monitoring_session("manual-first", False, ["salidzini"])
+    monitor = AssistedMarketplaceMonitor(store, BrowserBridge(timeout_seconds=150))
+
+    monitor.start("manual-first")
+
+    result = store.assisted_marketplace_run("manual-first")
+    assert result["status"] == "COMPLETE"
+    assert result["results"][0]["status"] == "ACTION_REQUIRED"
+    assert "Manual verification is ready" in result["results"][0]["error"]
+    assert monitor._tasks == {}

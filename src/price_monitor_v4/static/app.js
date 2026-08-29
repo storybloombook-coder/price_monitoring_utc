@@ -313,9 +313,20 @@ async function loadSetupStatus() {
 }
 
 function euro(value) { return value == null ? '—' : `${Number(value).toFixed(2)} EUR`; }
-function offerLink(offer) {
+function manualDecisionText(decision) {
+  if (!decision) return '';
+  const when = decision.decided_at ? new Date(decision.decided_at).toLocaleString('en-GB') : 'time unavailable';
+  if (decision.status === 'NOT_FOUND') return `Not found · decided ${when}`;
+  const seller = decision.seller_name ? ` · ${decision.seller_name}` : '';
+  return `${euro(decision.price_eur)} · ${(decision.availability || 'IN_STOCK').replaceAll('_', ' ')}${seller} · decided ${when}`;
+}
+function previousDecisionHtml(decision) {
+  return decision ? `<span class="previous-decision"><b>Previous manual decision:</b> ${escapeHtml(manualDecisionText(decision))}</span>` : '';
+}
+function offerLink(offer, warning = '') {
   if (!offer) return '—'; const label = `${euro(offer.price_eur)}${offer.store ? ` · ${escapeHtml(offer.store)}` : ''}`;
-  return offer.url ? `<a href="${escapeHtml(offer.url)}" target="_blank" rel="noopener">${label}</a>` : label;
+  const attrs = warning ? ` class="price-anomaly" title="${escapeHtml(warning)}"` : '';
+  return offer.url ? `<a${attrs} href="${escapeHtml(offer.url)}" target="_blank" rel="noopener">${label}${warning ? ' ⚠' : ''}</a>` : `<span${attrs}>${label}${warning ? ' ⚠' : ''}</span>`;
 }
 
 function sourceToken(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
@@ -404,14 +415,44 @@ function lowestOffer(row, field) {
   return offers.sort((a, b) => Number(a.price_eur) - Number(b.price_eur))[0] || null;
 }
 
+function rowPriceValues(row) {
+  const values = [];
+  row.tasks.filter(task => task.status === 'SUCCESS').forEach(task => {
+    for (const offer of [task.cheapest_in_stock, task.cheapest_pre_order]) {
+      if (offer?.price_eur != null) values.push(Number(offer.price_eur));
+    }
+  });
+  Object.values(row.shops).filter(item => item.status === 'SUCCESS' && item.price_eur != null)
+    .forEach(item => values.push(Number(item.price_eur)));
+  return [...new Set(values.filter(Number.isFinite).map(value => Number(value.toFixed(2))))].sort((a, b) => a - b);
+}
+
+function priceAnomalyWarning(row, value) {
+  const price = Number(value); const prices = rowPriceValues(row);
+  if (!Number.isFinite(price) || prices.length < 2 || prices[0] <= 0) return '';
+  const minimum = prices[0]; const next = prices.find(candidate => candidate > minimum);
+  if (price > minimum && (price - minimum) / minimum >= .2) {
+    return `Price warning: ${Math.round((price - minimum) / minimum * 100)}% above the lowest collected price (${euro(minimum)}). Verify the exact model.`;
+  }
+  if (Math.abs(price - minimum) < .01 && next && (next - minimum) / next >= .2) {
+    return `Price warning: ${Math.round((next - minimum) / next * 100)}% below the next collected price (${euro(next)}). Verify the exact model.`;
+  }
+  return '';
+}
+
+function correctionButton(kind, itemId, sourceKey) {
+  if (itemId == null || !sourceKey) return '';
+  return `<button type="button" class="compact secondary correct-result-button" data-correct-kind="${escapeHtml(kind)}" data-correct-item="${itemId}" data-correct-source="${escapeHtml(sourceKey)}">Correct result</button>`;
+}
+
 function marketplaceCell(row, openDetails) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces`;
   const summaries = row.tasks.map(task => {
     const offer = task.status === 'SUCCESS' ? task.cheapest_in_stock || task.cheapest_pre_order : null;
-    return offer ? `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offerLink(offer)}</span>` : `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${badge(task.status.replaceAll('_', ' '), statusClass(task.status))}</span>`;
+    return offer ? `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}</span>` : `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${badge(task.status.replaceAll('_', ' '), statusClass(task.status))}</span>`;
   }).join('');
-  const details = row.tasks.map(task => `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock)}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order)}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}</div>`).join('');
+  const details = row.tasks.map(task => { const source = marketplaceSourceForTask(task); return `<div class="detail-offer"><div><strong>${escapeHtml(task.marketplace)}</strong> ${badge(task.status, statusClass(task.status))}</div><span><b>Matched:</b> ${escapeHtml(task.matched_title || 'No matching title')}</span><span><b>In stock:</b> ${offerLink(task.cheapest_in_stock, priceAnomalyWarning(row, task.cheapest_in_stock?.price_eur))}</span><span><b>Pre-order:</b> ${offerLink(task.cheapest_pre_order, priceAnomalyWarning(row, task.cheapest_pre_order?.price_eur))}</span><span class="muted">Attempts: ${escapeHtml(task.attempts ?? 0)}${task.finished_at ? ` · Checked ${escapeHtml(new Date(task.finished_at).toLocaleString('en-GB'))}` : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`; }).join('');
   return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
 }
 
@@ -422,10 +463,11 @@ function shopCell(row, shop, openDetails) {
   const detailKey = `${row.key}:shop:${shop.key}`;
   const link = item.product_url || item.search_url;
   const retryLabel = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : null;
-  const summary = item.status === 'SUCCESS' ? `${euro(item.price_eur)}${item.cached ? ' · cached' : ''}` : item.status === 'PENDING' ? 'Checking…' : item.status === 'COOLDOWN' ? 'Cooldown' : item.status.replaceAll('_', ' ');
+  const priceWarning = item.status === 'SUCCESS' ? priceAnomalyWarning(row, item.price_eur) : '';
+  const summary = item.status === 'SUCCESS' ? `${euro(item.price_eur)}${item.cached ? ' · cached' : ''}${priceWarning ? ' ⚠' : ''}` : item.status === 'PENDING' ? 'Checking…' : item.status === 'COOLDOWN' ? 'Cooldown' : item.status.replaceAll('_', ' ');
   const linkLabel = item.status === 'ACTION_REQUIRED' ? 'Open verification' : `Open ${item.product_url ? 'product' : 'search'}`;
   const attempts = (item.attempts || []).map(attempt => `${attempt.method}: ${attempt.result.toLowerCase()} (${attempt.duration_ms} ms)`).join(' · ');
-  return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${badge(summary, statusClass(item.status))}</summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.collection_method ? `<span><b>Method:</b> ${escapeHtml(item.collection_method)}</span>` : ''}${attempts ? `<span class="muted">${escapeHtml(attempts)}</span>` : ''}${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}</div></details>`;
+  return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary><span class="${priceWarning ? 'price-anomaly' : ''}" ${priceWarning ? `title="${escapeHtml(priceWarning)}"` : ''}>${badge(summary, statusClass(item.status))}</span></summary><div class="detail-offer"><span>${escapeHtml(item.availability || 'Availability unknown')}</span>${item.collection_method ? `<span><b>Method:</b> ${escapeHtml(item.collection_method)}</span>` : ''}${attempts ? `<span class="muted">${escapeHtml(attempts)}</span>` : ''}${item.cached ? '<span class="cache-note">Cached result — no new retailer request was sent</span>' : ''}${retryLabel ? `<span class="cooldown-note">Retry after ${escapeHtml(retryLabel)}</span>` : ''}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(linkLabel)}</a>` : ''}${item.checked_at ? `<span class="muted">Checked ${escapeHtml(new Date(item.checked_at).toLocaleString('en-GB'))}</span>` : ''}${previousDecisionHtml(item.previous_manual_resolution)}${item.error ? `<span class="detail-error">${escapeHtml(item.error)}</span>` : ''}${correctionButton('shops', item.item_id, shop.key)}</div></details>`;
 }
 
 function columns() {
@@ -489,7 +531,7 @@ function renderResults() {
     const shopCells = state.sources.filter(item => item.kind === 'shop' && item.effective_enabled).map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
     const marketplaceResultCell = marketplacesEnabled ? cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell') : '';
     const refresh = row.itemId ? `<button type="button" class="refresh-model-button" data-refresh-model="${row.itemId}" title="Refresh this model across enabled shops and assisted marketplaces" aria-label="Refresh ${escapeHtml(row.model)}">↻</button>` : '';
-    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', `<span class="result-model"><span>${escapeHtml(row.model)}</span>${refresh}</span>`, 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer))}${cell('lowest-preorder', offerLink(preorderOffer))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
+    return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', `<span class="result-model"><span>${escapeHtml(row.model)}</span>${refresh}</span>`, 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer, priceAnomalyWarning(row, stockOffer?.price_eur)))}${cell('lowest-preorder', offerLink(preorderOffer, priceAnomalyWarning(row, preorderOffer?.price_eur)))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
 
@@ -508,18 +550,21 @@ function renderActionRequired(run) {
     error: item.error || '',
     product_url: item.product_url || '',
     search_url: item.search_url || '',
+    previous: item.previous_manual_resolution || null,
   })));
   if (renderSignature !== state.actionRenderSignature) {
     state.actionRenderSignature = renderSignature;
     byId('action-items').innerHTML = items.length ? items.map(item => {
     const link = item.product_url || item.search_url;
     const identity = `${item.action_kind}:${item.item_id}:${item.action_key}`;
+    const previous = item.previous_manual_resolution || {};
+    const previousPrice = previous.status === 'SUCCESS' && previous.price_eur != null ? previous.price_eur : '';
     const sellerField = item.action_kind === 'marketplaces' && item.action_key === 'salidzini'
-      ? '<label>Seller / shop<input data-action-field="seller" autocomplete="off" placeholder="For example, RD Electronics" required></label>' : '';
+      ? `<label>Seller / shop<input data-action-field="seller" autocomplete="off" value="${escapeHtml(previous.seller_name || '')}" placeholder="For example, RD Electronics" required></label>` : '';
     const attrs = `data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}"`;
-    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span></div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" ${attrs}>Capture again</button>
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${previousDecisionHtml(item.previous_manual_resolution)}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" ${attrs}>Capture again</button>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
-      <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
+      <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" value="${escapeHtml(previousPrice)}" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
     }).join('') : '<p class="muted">No checks currently require browser verification.</p>';
   }
@@ -604,6 +649,71 @@ async function handleActionDialog(event) {
     button.textContent = originalLabel;
     showBanner('error', error.message);
   }
+}
+
+function correctionTarget(kind, itemId, sourceKey) {
+  if (kind === 'shops') {
+    return state.shopResults.find(item => Number(item.item_id) === Number(itemId) && item.shop_key === sourceKey);
+  }
+  return state.tasks.find(item => Number(item.item_id) === Number(itemId) && (
+    (marketplaceSourceForTask(item)?.key || item.marketplace_key) === sourceKey
+  ));
+}
+
+function openResultCorrection(event) {
+  const button = event.target.closest('[data-correct-kind]');
+  if (!button) return;
+  const kind = button.dataset.correctKind; const itemId = Number(button.dataset.correctItem); const sourceKey = button.dataset.correctSource;
+  const item = correctionTarget(kind, itemId, sourceKey);
+  if (!item) return showBanner('error', 'The selected result is no longer available.');
+  const isMarketplace = kind === 'marketplaces';
+  const offer = isMarketplace ? item.cheapest_in_stock || item.cheapest_pre_order : null;
+  const sourceName = isMarketplace ? item.marketplace : item.shop_name || item.shop_key;
+  const model = isMarketplace ? item.source_model || item.canonical_model : item.model;
+  const previous = item.previous_manual_resolution;
+  const currentPrice = isMarketplace ? offer?.price_eur : item.price_eur;
+  const currentAvailability = isMarketplace
+    ? (item.cheapest_in_stock ? 'IN_STOCK' : item.cheapest_pre_order ? 'PRE_ORDER' : null)
+    : item.availability;
+  const previousPrice = previous?.status === 'SUCCESS' ? previous.price_eur : null;
+  byId('correction-kind').value = kind; byId('correction-item-id').value = itemId; byId('correction-source-key').value = sourceKey;
+  byId('correction-title').textContent = `${model} · ${sourceName}`;
+  byId('correction-current').innerHTML = `<b>Current result:</b> ${escapeHtml(item.status === 'SUCCESS' ? `${euro(currentPrice)} · ${(currentAvailability || 'IN_STOCK').replaceAll('_', ' ')}` : item.status.replaceAll('_', ' '))}`;
+  byId('correction-previous').innerHTML = previous ? `<b>Previous manual decision:</b> ${escapeHtml(manualDecisionText(previous))}` : '<b>Previous manual decision:</b> none';
+  byId('correction-price').value = currentPrice ?? previousPrice ?? '';
+  byId('correction-availability').value = currentAvailability || previous?.availability || 'IN_STOCK';
+  byId('correction-seller').value = offer?.store || previous?.seller_name || '';
+  byId('correction-url').value = (isMarketplace ? offer?.url || item.product_url || item.search_url : item.product_url) || previous?.product_url || '';
+  byId('correction-seller-label').hidden = !isMarketplace;
+  byId('correction-url-label').hidden = !isMarketplace;
+  if (!byId('correction-dialog').open) byId('correction-dialog').showModal();
+}
+
+async function saveResultCorrection(status) {
+  const kind = byId('correction-kind').value; const itemId = byId('correction-item-id').value; const sourceKey = byId('correction-source-key').value;
+  const payload = { status };
+  if (status === 'SUCCESS') {
+    const price = Number(byId('correction-price').value.trim().replace(',', '.'));
+    if (!Number.isFinite(price) || price < 0) {
+      const field = byId('correction-price'); field.setCustomValidity('Enter a valid non-negative price.'); field.reportValidity(); field.setCustomValidity(''); return;
+    }
+    payload.price_eur = price; payload.availability = byId('correction-availability').value;
+    if (kind === 'marketplaces') {
+      payload.seller_name = byId('correction-seller').value.trim();
+      payload.product_url = byId('correction-url').value.trim() || null;
+      if (!payload.product_url) { const field = byId('correction-url'); field.setCustomValidity('Enter the link supporting this corrected price.'); field.reportValidity(); field.setCustomValidity(''); return; }
+      if (!byId('correction-url').checkValidity()) { byId('correction-url').reportValidity(); return; }
+    }
+  }
+  const buttons = byId('correction-dialog').querySelectorAll('button'); buttons.forEach(button => { button.disabled = true; });
+  try {
+    await api(`/runs/${encodeURIComponent(state.currentRunId)}/${kind}/${itemId}/${encodeURIComponent(sourceKey)}/resolve`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    byId('correction-dialog').close(); await pollRun(state.currentRunId);
+    showBanner('success', status === 'NOT_FOUND' ? 'Result corrected to Not found.' : 'Corrected price saved.');
+  } catch (error) { showBanner('error', error.message); }
+  finally { buttons.forEach(button => { button.disabled = false; }); }
 }
 
 function renderRun(run) {
@@ -723,9 +833,12 @@ function wireEvents() {
   byId('source-rows').addEventListener('click', handleItemAction); byId('stock-rows').addEventListener('click', handleItemAction); byId('item-form').addEventListener('submit', saveItem);
   byId('dialog-close').addEventListener('click', () => byId('item-dialog').close()); byId('dialog-cancel').addEventListener('click', () => byId('item-dialog').close());
   byId('action-close').addEventListener('click', () => byId('action-dialog').close()); byId('action-later').addEventListener('click', () => byId('action-dialog').close());
+  byId('correction-close').addEventListener('click', () => byId('correction-dialog').close()); byId('correction-cancel').addEventListener('click', () => byId('correction-dialog').close());
+  byId('correction-not-found').addEventListener('click', () => saveResultCorrection('NOT_FOUND'));
+  byId('correction-form').addEventListener('submit', event => { event.preventDefault(); saveResultCorrection('SUCCESS'); });
   byId('method-test-close').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-cancel').addEventListener('click', () => byId('method-test-dialog').close()); byId('method-test-run').addEventListener('click', runMethodTest);
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
-  byId('result-rows').addEventListener('click', refreshOneModel); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
+  byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
@@ -736,7 +849,7 @@ async function initialize() {
   wireEvents();
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · monitoring service ${health.legacy_service}`; byId('service-state').classList.add('ok');
-    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
+    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h shop cache · ${Math.round(policy.assisted_marketplace_cache_ttl_seconds / 3600)} h assisted cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
     await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge(), loadMonitoringHistory()]); try { renderRun(await api('/runs/latest')); await loadMonitoringHistory(); } catch { renderResults(); }
     setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }

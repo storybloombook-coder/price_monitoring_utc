@@ -1,4 +1,4 @@
-# Price Monitor 4.2.1
+# Price Monitor 4.2.2
 
 Local-first Windows application for TCL marketplace and direct-shop price monitoring. Version 4 adds an editable catalog, per-source controls, compact model-level results, and direct retailer checks while preserving Excel import and local SQLite history.
 
@@ -51,7 +51,7 @@ If the Edge extension is connected, protected pages are automatically delegated 
 
 Opening a retailer page does not silently change stored monitoring data. The **Action required** dialog provides explicit follow-up actions: **Capture again** after completing browser verification, **Mark not found** after confirming that the model is absent, or **Save manual price** for a confirmed in-stock offer. Manual results immediately update the table and invalidate the previous export so it can be regenerated.
 
-Salidzini uses the same dialog when protection or an unusual result needs review. This closes the source without pretending that merely opening a page changed the result: the operator explicitly confirms absence/price or asks the extension to capture the verified page again. Successful assisted results are cached for 12 hours to reduce repeated requests.
+Salidzini opens the manual-review workflow immediately for fresh uncached checks. The operator can confirm absence/price or explicitly ask the extension to capture the verified page. Successful assisted results are cached for 4 hours to balance freshness with repeated manual work.
 
 Status badges include hover/focus explanations throughout the catalog, stock table, and monitoring results. Expanded marketplace and shop result cells remain open while the running monitor refreshes the table.
 
@@ -91,6 +91,6 @@ Live marketplace collection is enabled by default (`ENABLE_LIVE_MARKETPLACES=tru
 ./build-v4.ps1
 ```
 
-The default build command updates the stable portable directory `dist/PriceMonitor-v4.0.0-windows-x64-portable` in place (the application itself reports version 4.2.1). Keeping this directory stable preserves local data and the unpacked Edge extension path. It does not create a ZIP file. Use `./build-v4.ps1 -Archive` only when an archive is explicitly needed.
+The default build command updates the stable portable directory `dist/PriceMonitor-v4.0.0-windows-x64-portable` in place (the application itself reports version 4.2.2). Keeping this directory stable preserves local data and the unpacked Edge extension path. It does not create a ZIP file. Use `./build-v4.ps1 -Archive` only when an archive is explicitly needed.
 
 The Python source for the v4 catalog, API, launcher, and interface is reproducible from this repository. Marketplace collection is temporarily delegated to the supplied v3 executable in an isolated internal service because the original v3 adapter source was not present in the supplied folder.
