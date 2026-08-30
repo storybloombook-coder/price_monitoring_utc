@@ -144,12 +144,19 @@ def create_app(
         request_delay_max_seconds=float(app_settings.env.get("SHOP_REQUEST_DELAY_MAX_SECONDS", "15")),
         cooldown_seconds=float(app_settings.env.get("SHOP_COOLDOWN_SECONDS", "3600")),
         cache_ttl_seconds=float(app_settings.env.get("SHOP_CACHE_TTL_SECONDS", "14400")),
+        negative_cache_ttl_seconds=float(
+            app_settings.env.get("SHOP_NEGATIVE_CACHE_TTL_SECONDS", "21600")
+        ),
+        browser_concurrency=int(app_settings.env.get("SHOP_BROWSER_CONCURRENCY", "2")),
     )
     assisted_marketplace_monitor = AssistedMarketplaceMonitor(
         catalog,
         browser_bridge,
         cache_ttl_seconds=float(
             app_settings.env.get("ASSISTED_MARKETPLACE_CACHE_TTL_SECONDS", "14400")
+        ),
+        negative_cache_ttl_seconds=float(
+            app_settings.env.get("ASSISTED_MARKETPLACE_NEGATIVE_CACHE_TTL_SECONDS", "21600")
         ),
         request_delay_seconds=float(
             app_settings.env.get("ASSISTED_MARKETPLACE_DELAY_SECONDS", "3")
@@ -220,7 +227,10 @@ def create_app(
                 "delay_seconds": [shop_monitor.request_delay_min_seconds, shop_monitor.request_delay_max_seconds],
                 "cooldown_seconds": shop_monitor.cooldown_seconds,
                 "cache_ttl_seconds": shop_monitor.cache_ttl_seconds,
+                "negative_cache_ttl_seconds": shop_monitor.negative_cache_ttl_seconds,
+                "browser_concurrency": shop_monitor.browser_concurrency,
                 "assisted_marketplace_cache_ttl_seconds": assisted_marketplace_monitor.cache_ttl_seconds,
+                "assisted_marketplace_negative_cache_ttl_seconds": assisted_marketplace_monitor.negative_cache_ttl_seconds,
             },
             "catalog": catalog.stats(),
         }
@@ -612,6 +622,20 @@ def create_app(
             if task.get("status") == "SUCCESS" and offer.get("url"):
                 catalog.remember_source_link(item["id"], source["key"], str(offer["url"]))
         shop = catalog.shop_run(run_id)
+        run["run_mode"] = session.get("run_mode") or "balanced"
+        run["execution"] = shop_monitor.progress(run_id) or {
+            "mode": run["run_mode"],
+            "phase": "complete" if shop["status"] != "RUNNING" else "monitoring",
+            "phase_label": "Direct shop checks complete" if shop["status"] != "RUNNING" else "Monitoring direct shops",
+            "total": len(shop["results"]),
+            "finished": sum(
+                1 for item in shop["results"]
+                if item.get("status") not in {"PENDING", "RUNNING"}
+            ),
+            "pending": shop["pending"],
+            "cached": sum(1 for item in shop["results"] if item.get("cached")),
+            "eta_seconds": None,
+        }
         run["shop_results"] = []
         for result in shop["results"]:
             normalized = normalize_shop_result(result)
@@ -645,6 +669,9 @@ def create_app(
 
     @app.post("/runs")
     async def start_run(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+        run_mode = str(payload.get("mode") or "balanced").strip().lower()
+        if run_mode not in {"quick", "balanced", "deep"}:
+            raise HTTPException(400, "Monitoring mode must be quick, balanced, or deep")
         catalog.prepare_legacy(app_settings.original_database, app_settings.legacy_database, app_settings.active_workbook)
         sources = catalog.list_sources()
         marketplaces = [source["key"] for source in sources if source["kind"] == "marketplace" and source["effective_enabled"]]
@@ -652,7 +679,8 @@ def create_app(
             key for key in marketplaces if key not in assisted_marketplace_monitor.supported_keys
         ]
         if legacy_marketplaces:
-            legacy_run = await legacy_json("POST", "/runs", payload)
+            # Run mode is a v4 concern; the private v3 engine accepts no such field.
+            legacy_run = await legacy_json("POST", "/runs", {})
             run_id = str(legacy_run.get("run_id") or legacy_run.get("id"))
             if not run_id or run_id == "None":
                 raise HTTPException(502, "Marketplace service returned no run ID")
@@ -660,10 +688,12 @@ def create_app(
         else:
             run_id = f"v4-{uuid.uuid4()}"
             legacy_started = False
-        catalog.register_monitoring_session(run_id, legacy_started, marketplaces)
-        shop_monitor.start(run_id)
-        assisted_marketplace_monitor.start(run_id)
-        return JSONResponse({"run_id": run_id, "status": "RUNNING"})
+        catalog.register_monitoring_session(
+            run_id, legacy_started, marketplaces, run_mode=run_mode
+        )
+        shop_monitor.start(run_id, run_mode)
+        assisted_marketplace_monitor.start(run_id, run_mode)
+        return JSONResponse({"run_id": run_id, "status": "RUNNING", "mode": run_mode})
 
     @app.get("/runs/latest")
     async def latest_run() -> JSONResponse:

@@ -253,6 +253,42 @@ def test_direct_only_does_not_fallback_after_protection() -> None:
     assert [attempt["method"] for attempt in kwargs["attempts"]] == ["direct"]
 
 
+def test_quick_mode_leaves_rendered_page_for_selective_review() -> None:
+    class Store:
+        observation = None
+
+        def pause_shop_for_protection(self, *args) -> str:
+            raise AssertionError("A render-only Quick result must not pause the entire source")
+
+        def finish_shop_observation(self, *args, **kwargs) -> None:
+            self.observation = (args, kwargs)
+
+    class Renderer:
+        async def fetch(self, url: str, model: str = "") -> None:
+            raise AssertionError("Quick mode must not start an automatic browser fallback")
+
+    async def run() -> tuple:
+        store = Store()
+        monitor = ShopMonitor(store)
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, text='<span class="MuiSkeleton-root"></span>', request=request
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            await monitor._check_one(
+                client, Renderer(), "quick-run",
+                {"id": 11, "model": "25G64", "shop_links": {}},
+                {"key": "elisa"}, fast_only=True,
+            )
+        return store.observation
+
+    args, kwargs = asyncio.run(run())
+    assert args[3] == "ACTION_REQUIRED"
+    assert "Quick mode" in kwargs["error"]
+    assert [attempt["method"] for attempt in kwargs["attempts"]] == ["direct"]
+
+
 def test_manual_only_sends_no_request_and_does_not_start_protection_cooldown() -> None:
     class Store:
         observation = None

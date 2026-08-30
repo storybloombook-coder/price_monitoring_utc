@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "PriceMonitor Browser Bridge",
-  "version": "4.2.3",
+  "version": "4.2.4",
   "description": "Uses your normal Edge session to return rendered retailer pages to the local PriceMonitor application.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzzBp//wcm9wGDVr3+Yg9hzOiVLwq+Je+Ie9ARu52tEFd7a+d7E8ZJrWo/2jkiqlrzhsWV+xsBDl5tsp9oH0u85AlzMVmsSiYWm2gVuZJo/Zl7w/N+d+23zYS+0mX40c2TMCWA4B8Y99jjA6WSLysR3dnkGICZaCOSUKIHhTORMb9AntWNwoDSEGd0oTgaZ6kDW95f30qwHGexgEhA1ZAcwDeVh8UDdAPO5qOyGTl4zh35LpBm8ycAvyGLpfRpsdWoAdME/TOjhqhq22iTkHOereWzdHTXAknFc4n9A2u7AoewsiKYuZKR37OFZA9CvAOuKknqxhWvHmTrsW445Yn3QIDAQAB",
   "permissions": ["alarms", "offscreen", "scripting", "storage", "tabs"],

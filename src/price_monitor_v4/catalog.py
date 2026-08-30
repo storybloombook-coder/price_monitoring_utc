@@ -137,6 +137,7 @@ class CatalogStore:
                     run_id TEXT PRIMARY KEY,
                     legacy_started INTEGER NOT NULL,
                     marketplace_keys TEXT NOT NULL DEFAULT '[]',
+                    run_mode TEXT NOT NULL DEFAULT 'balanced',
                     created_at TEXT NOT NULL,
                     stopped_at TEXT,
                     cleared_at TEXT
@@ -160,6 +161,8 @@ class CatalogStore:
                     PRIMARY KEY(run_id, item_id, shop_key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_shop_observations_run ON shop_observations(run_id, status);
+                CREATE INDEX IF NOT EXISTS idx_shop_observations_cache
+                    ON shop_observations(item_id, shop_key, checked_at DESC);
                 CREATE TABLE IF NOT EXISTS assisted_marketplace_observations (
                     run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
                     item_id INTEGER NOT NULL REFERENCES catalog_items(id),
@@ -180,6 +183,8 @@ class CatalogStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_assisted_marketplace_run
                     ON assisted_marketplace_observations(run_id, status);
+                CREATE INDEX IF NOT EXISTS idx_assisted_marketplace_cache
+                    ON assisted_marketplace_observations(item_id, marketplace_key, checked_at DESC);
                 CREATE TABLE IF NOT EXISTS manual_resolutions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id) ON DELETE CASCADE,
@@ -211,6 +216,10 @@ class CatalogStore:
                 db.execute("ALTER TABLE monitoring_sessions ADD COLUMN stopped_at TEXT")
             if "cleared_at" not in session_columns:
                 db.execute("ALTER TABLE monitoring_sessions ADD COLUMN cleared_at TEXT")
+            if "run_mode" not in session_columns:
+                db.execute(
+                    "ALTER TABLE monitoring_sessions ADD COLUMN run_mode TEXT NOT NULL DEFAULT 'balanced'"
+                )
             observation_columns = {
                 row[1] for row in db.execute("PRAGMA table_info(shop_observations)")
             }
@@ -768,12 +777,27 @@ class CatalogStore:
             self._set_meta(db, "source_masters", masters)
         return {"kind": kind, "enabled": bool(enabled)}
 
-    def register_monitoring_session(self, run_id: str, legacy_started: bool, marketplace_keys: list[str]) -> None:
+    def register_monitoring_session(
+        self,
+        run_id: str,
+        legacy_started: bool,
+        marketplace_keys: list[str],
+        run_mode: str = "balanced",
+    ) -> None:
+        if run_mode not in {"quick", "balanced", "deep"}:
+            raise ValueError(f"Unsupported monitoring mode: {run_mode}")
         with self._lock, self.connect() as db:
             db.execute(
-                "INSERT OR REPLACE INTO monitoring_sessions(run_id, legacy_started, marketplace_keys, created_at) "
-                "VALUES(?, ?, ?, ?)",
-                (run_id, int(legacy_started), json.dumps(marketplace_keys), utc_now()),
+                "INSERT OR REPLACE INTO monitoring_sessions("
+                "run_id, legacy_started, marketplace_keys, run_mode, created_at) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    int(legacy_started),
+                    json.dumps(marketplace_keys),
+                    run_mode,
+                    utc_now(),
+                ),
             )
 
     def stop_monitoring_session(self, run_id: str) -> None:
@@ -942,9 +966,13 @@ class CatalogStore:
         models: list[dict[str, Any]],
         shops: list[dict[str, Any]],
         cache_ttl_seconds: float = 0,
+        negative_cache_ttl_seconds: float = 0,
     ) -> None:
         now = datetime.now(UTC)
         cutoff = (now - timedelta(seconds=max(0, cache_ttl_seconds))).isoformat()
+        negative_cutoff = (
+            now - timedelta(seconds=max(0, negative_cache_ttl_seconds))
+        ).isoformat()
         now_text = now.isoformat()
         with self._lock, self.connect() as db:
             db.execute("DELETE FROM shop_observations WHERE run_id=?", (run_id,))
@@ -963,26 +991,43 @@ class CatalogStore:
                         )
                         continue
                     cached = None
-                    if cache_ttl_seconds > 0:
+                    if cache_ttl_seconds > 0 or negative_cache_ttl_seconds > 0:
                         cached = db.execute(
-                            "SELECT title,price_eur,availability,product_url,search_url,checked_at,"
-                            "collection_method,attempts_json "
+                            "SELECT status,title,price_eur,availability,product_url,search_url,error,"
+                            "checked_at,collection_method,attempts_json "
                             "FROM shop_observations WHERE run_id<>? AND item_id=? AND shop_key=? "
-                            "AND status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=? "
+                            "AND ((status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=? "
                             "AND (collection_method='manual' OR (product_url IS NOT NULL "
-                            "AND lower(product_url)<>lower(COALESCE(search_url,'')))) "
+                            "AND lower(product_url)<>lower(COALESCE(search_url,''))))) "
+                            "OR (status='NOT_FOUND' AND checked_at>=?)) "
                             "ORDER BY checked_at DESC LIMIT 1",
-                            (run_id, model["id"], shop["key"], cutoff),
+                            (
+                                run_id,
+                                model["id"],
+                                shop["key"],
+                                cutoff,
+                                negative_cutoff,
+                            ),
                         ).fetchone()
                     if cached:
                         db.execute(
                             "INSERT INTO shop_observations(run_id,item_id,shop_key,status,title,price_eur,availability,"
-                            "product_url,search_url,checked_at,collection_method,attempts_json,cached) "
-                            "VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,?,?,1)",
+                            "product_url,search_url,error,checked_at,collection_method,attempts_json,cached) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
                             (
-                                run_id, model["id"], shop["key"], cached["title"], cached["price_eur"],
-                                cached["availability"], cached["product_url"], cached["search_url"], cached["checked_at"],
-                                cached["collection_method"], cached["attempts_json"] or "[]",
+                                run_id,
+                                model["id"],
+                                shop["key"],
+                                cached["status"],
+                                cached["title"],
+                                cached["price_eur"],
+                                cached["availability"],
+                                cached["product_url"],
+                                cached["search_url"],
+                                cached["error"],
+                                cached["checked_at"],
+                                cached["collection_method"],
+                                cached["attempts_json"] or "[]",
                             ),
                         )
                     else:
@@ -1196,32 +1241,55 @@ class CatalogStore:
         models: list[dict[str, Any]],
         marketplaces: list[dict[str, Any]],
         cache_ttl_seconds: float = 0,
+        negative_cache_ttl_seconds: float = 0,
     ) -> None:
-        cutoff = (datetime.now(UTC) - timedelta(seconds=max(0, cache_ttl_seconds))).isoformat()
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(seconds=max(0, cache_ttl_seconds))).isoformat()
+        negative_cutoff = (
+            now - timedelta(seconds=max(0, negative_cache_ttl_seconds))
+        ).isoformat()
         with self._lock, self.connect() as db:
             db.execute("DELETE FROM assisted_marketplace_observations WHERE run_id=?", (run_id,))
             for model in models:
                 for marketplace in marketplaces:
                     cached = None
-                    if cache_ttl_seconds > 0:
+                    if cache_ttl_seconds > 0 or negative_cache_ttl_seconds > 0:
                         cached = db.execute(
-                            "SELECT title,seller_name,price_eur,availability,product_url,search_url,checked_at,"
+                            "SELECT status,title,seller_name,price_eur,availability,product_url,search_url,error,checked_at,"
                             "collection_method,attempts_json FROM assisted_marketplace_observations "
-                            "WHERE run_id<>? AND item_id=? AND marketplace_key=? AND status='SUCCESS' "
-                            "AND price_eur IS NOT NULL AND checked_at>=? ORDER BY checked_at DESC LIMIT 1",
-                            (run_id, model["id"], marketplace["key"], cutoff),
+                            "WHERE run_id<>? AND item_id=? AND marketplace_key=? "
+                            "AND ((status='SUCCESS' AND price_eur IS NOT NULL AND checked_at>=?) "
+                            "OR (status='NOT_FOUND' AND checked_at>=?)) "
+                            "ORDER BY checked_at DESC LIMIT 1",
+                            (
+                                run_id,
+                                model["id"],
+                                marketplace["key"],
+                                cutoff,
+                                negative_cutoff,
+                            ),
                         ).fetchone()
                     if cached:
                         db.execute(
                             "INSERT INTO assisted_marketplace_observations("
                             "run_id,item_id,marketplace_key,status,title,seller_name,price_eur,availability,"
-                            "product_url,search_url,checked_at,cached,collection_method,attempts_json) "
-                            "VALUES(?,?,?,'SUCCESS',?,?,?,?,?,?,?,1,?,?)",
+                            "product_url,search_url,error,checked_at,cached,collection_method,attempts_json) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
                             (
-                                run_id, model["id"], marketplace["key"], cached["title"],
-                                cached["seller_name"], cached["price_eur"], cached["availability"],
-                                cached["product_url"], cached["search_url"], cached["checked_at"],
-                                cached["collection_method"], cached["attempts_json"] or "[]",
+                                run_id,
+                                model["id"],
+                                marketplace["key"],
+                                cached["status"],
+                                cached["title"],
+                                cached["seller_name"],
+                                cached["price_eur"],
+                                cached["availability"],
+                                cached["product_url"],
+                                cached["search_url"],
+                                cached["error"],
+                                cached["checked_at"],
+                                cached["collection_method"],
+                                cached["attempts_json"] or "[]",
                             ),
                         )
                     else:

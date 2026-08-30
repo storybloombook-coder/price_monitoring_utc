@@ -113,16 +113,20 @@ class AssistedMarketplaceMonitor:
         browser_bridge: BrowserBridge,
         *,
         cache_ttl_seconds: float = 14_400,
+        negative_cache_ttl_seconds: float = 21_600,
         request_delay_seconds: float = 3,
     ) -> None:
         self.store = store
         self.browser_bridge = browser_bridge
         self.cache_ttl_seconds = max(0, cache_ttl_seconds)
+        self.negative_cache_ttl_seconds = max(0, negative_cache_ttl_seconds)
         self.request_delay_seconds = max(0, request_delay_seconds)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._blocked: set[str] = set()
 
-    def start(self, run_id: str) -> None:
+    def start(self, run_id: str, mode: str = "balanced") -> None:
+        if mode not in {"quick", "balanced", "deep"}:
+            raise ValueError(f"Unsupported monitoring mode: {mode}")
         self._blocked.clear()
         models = [item for item in self.store.list_items("source", "active") if not item["paused"]]
         marketplaces = [
@@ -130,8 +134,16 @@ class AssistedMarketplaceMonitor:
             if item["kind"] == "marketplace" and item["effective_enabled"]
             and item["key"] in self.supported_keys
         ]
+        success_cache_ttl = 0 if mode == "deep" else (
+            max(self.cache_ttl_seconds, 43_200) if mode == "quick" else self.cache_ttl_seconds
+        )
+        negative_cache_ttl = 0 if mode == "deep" else self.negative_cache_ttl_seconds
         self.store.start_assisted_marketplace_run(
-            run_id, models, marketplaces, self.cache_ttl_seconds
+            run_id,
+            models,
+            marketplaces,
+            success_cache_ttl,
+            negative_cache_ttl,
         )
         # Salidzini commonly starts with hCaptcha. Do not hide the manual workflow
         # behind the full extension timeout: fresh uncached checks are immediately

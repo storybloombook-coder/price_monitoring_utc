@@ -601,6 +601,8 @@ class ShopMonitor:
         request_delay_max_seconds: float = 15,
         cooldown_seconds: float = 3600,
         cache_ttl_seconds: float = 14_400,
+        negative_cache_ttl_seconds: float = 21_600,
+        browser_concurrency: int = 2,
     ) -> None:
         self.store = store
         self.timeout_seconds = timeout_seconds
@@ -609,23 +611,62 @@ class ShopMonitor:
         self.request_delay_max_seconds = max(self.request_delay_min_seconds, request_delay_max_seconds)
         self.cooldown_seconds = max(1, cooldown_seconds)
         self.cache_ttl_seconds = max(0, cache_ttl_seconds)
+        self.negative_cache_ttl_seconds = max(0, negative_cache_ttl_seconds)
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._browser_semaphore = asyncio.Semaphore(1)
+        # Each retailer remains strictly sequential. Two browser slots allow
+        # different domains to render in parallel without creating a burst.
+        self.browser_concurrency = max(1, int(browser_concurrency))
+        self._browser_semaphore = asyncio.Semaphore(self.browser_concurrency)
         self._extension_semaphore = asyncio.Semaphore(1)
         self._retry_locks: dict[str, asyncio.Lock] = {}
         self._browser_blocked: set[str] = set()
         self._extension_blocked: set[str] = set()
+        self._progress: dict[str, dict[str, Any]] = {}
 
-    def start(self, run_id: str) -> None:
+    def start(self, run_id: str, mode: str = "balanced") -> None:
+        if mode not in {"quick", "balanced", "deep"}:
+            raise ValueError(f"Unsupported monitoring mode: {mode}")
         self._browser_blocked.clear()
         self._extension_blocked.clear()
         models = [item for item in self.store.list_items("source", "active") if not item["paused"]]
         shops = [item for item in self.store.list_sources() if item["kind"] == "shop" and item["effective_enabled"]]
-        self.store.start_shop_run(run_id, models, shops, self.cache_ttl_seconds)
+        success_cache_ttl = 0 if mode == "deep" else (
+            max(self.cache_ttl_seconds, 43_200) if mode == "quick" else self.cache_ttl_seconds
+        )
+        negative_cache_ttl = 0 if mode == "deep" else self.negative_cache_ttl_seconds
+        self.store.start_shop_run(
+            run_id,
+            models,
+            shops,
+            success_cache_ttl,
+            negative_cache_ttl,
+        )
+        initial = self.store.shop_run(run_id)["results"]
+        cached = sum(1 for item in initial if item.get("cached"))
+        self._progress[run_id] = {
+            "mode": mode,
+            "phase": "known_links",
+            "phase_label": "Checking saved product links",
+            "started_monotonic": time.monotonic(),
+            "total": len(initial),
+            "initial_cached": cached,
+            "success_cache_ttl_seconds": success_cache_ttl,
+            "negative_cache_ttl_seconds": negative_cache_ttl,
+        }
         if models and shops:
-            self._tasks[run_id] = asyncio.create_task(self._run(run_id, models, shops))
+            self._tasks[run_id] = asyncio.create_task(self._run(run_id, models, shops, mode))
+        else:
+            self._progress[run_id].update({
+                "phase": "complete", "phase_label": "Direct shop checks complete"
+            })
 
-    async def _run(self, run_id: str, models: list[dict[str, Any]], shops: list[dict[str, Any]]) -> None:
+    async def _run(
+        self,
+        run_id: str,
+        models: list[dict[str, Any]],
+        shops: list[dict[str, Any]],
+        mode: str = "balanced",
+    ) -> None:
         renderer = EdgeRenderer(self.timeout_seconds)
         database = Path(getattr(self.store, "database", Path(tempfile.gettempdir()) / "price-monitor.sqlite3"))
         playwright_renderer = PlaywrightRenderer(database.parent / "playwright-edge-profile", self.timeout_seconds)
@@ -635,27 +676,49 @@ class ShopMonitor:
             "Accept-Language": "en-US,en;q=0.9,lt;q=0.8,et;q=0.7",
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
-            async def one_shop(shop: dict[str, Any]) -> None:
-                ordered_models = sorted(
-                    models,
-                    key=lambda model: not bool((model.get("shop_links") or {}).get(shop["key"])),
-                )
-                sent_request = False
-                for model in ordered_models:
+            shops_with_request: set[str] = set()
+
+            async def one_shop(shop: dict[str, Any], saved_links: bool) -> None:
+                phase_models = [
+                    model for model in models
+                    if bool((model.get("shop_links") or {}).get(shop["key"])) == saved_links
+                ]
+                sent_request = shop["key"] in shops_with_request
+                for model in phase_models:
                     if not self.store.shop_observation_pending(run_id, model["id"], shop["key"]):
                         continue
                     if sent_request and shop.get("collection_method") != "manual":
                         await asyncio.sleep(random.uniform(
                             self.request_delay_min_seconds, self.request_delay_max_seconds
                         ))
-                    await self._check_one(client, renderer, run_id, model, shop, playwright_renderer)
+                    args = (
+                        client, renderer, run_id, model, shop, playwright_renderer
+                    )
+                    if mode == "quick":
+                        await self._check_one(*args, fast_only=True)
+                    else:
+                        await self._check_one(*args)
                     sent_request = True
+                    shops_with_request.add(shop["key"])
             try:
-                # Shops may progress independently, but a single domain is always sequential.
-                await asyncio.gather(*(one_shop(shop) for shop in shops))
+                # Complete known product URLs globally before starting broad discovery.
+                # Shops progress independently, while each domain remains sequential.
+                for saved_links, phase, label in (
+                    (True, "known_links", "Checking saved product links"),
+                    (False, "discovery", "Searching remaining models"),
+                ):
+                    if run_id in self._progress:
+                        self._progress[run_id].update({
+                            "phase": phase, "phase_label": label
+                        })
+                    await asyncio.gather(*(one_shop(shop, saved_links) for shop in shops))
             finally:
                 await renderer.close()
                 await playwright_renderer.close()
+        if run_id in self._progress:
+            self._progress[run_id].update({
+                "phase": "complete", "phase_label": "Direct shop checks complete"
+            })
         self._tasks.pop(run_id, None)
 
     async def _check_one(
@@ -668,6 +731,7 @@ class ShopMonitor:
         playwright_renderer: PlaywrightRenderer | None = None,
         method_override: str | None = None,
         link_only: bool = False,
+        fast_only: bool = False,
     ) -> None:
         attempts: list[dict[str, Any]] = []
         selected_method = method_override or str(shop.get("collection_method") or "auto")
@@ -848,12 +912,23 @@ class ShopMonitor:
                 except ProtectionBlockedError as direct_error:
                     if direct_error.retry_after_seconds:
                         raise
+                    if fast_only:
+                        raise ActionRequiredError(
+                            "Quick mode stopped after retailer protection blocked the direct request; "
+                            "retry this check or use Balanced / Deep mode"
+                        ) from direct_error
                     if self.browser_bridge and self.browser_bridge.connected:
                         return await attempted("extension", lambda: fetch_from_extension(url))
                     raise ActionRequiredError(
                         "Retailer protection blocked direct collection and the Edge extension is not connected"
                     ) from direct_error
-                except (RenderRequiredError, httpx.HTTPError, CollectionMethodUnavailable):
+                except (RenderRequiredError, httpx.HTTPError, CollectionMethodUnavailable) as direct_error:
+                    if fast_only:
+                        raise ActionRequiredError(
+                            "Quick mode completed the direct attempt, but this page needs browser rendering; "
+                            "retry this check or use Balanced / Deep mode",
+                            pause_source=False,
+                        ) from direct_error
                     return await fetch_browser_fallback(url)
 
             parsed = None
@@ -1080,6 +1155,8 @@ class ShopMonitor:
             request_delay_max_seconds=0,
             cooldown_seconds=self.cooldown_seconds,
             cache_ttl_seconds=0,
+            negative_cache_ttl_seconds=0,
+            browser_concurrency=1,
         )
         renderer = EdgeRenderer(self.timeout_seconds)
         playwright_renderer = PlaywrightRenderer(
@@ -1122,7 +1199,37 @@ class ShopMonitor:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
 
+    def progress(self, run_id: str) -> dict[str, Any] | None:
+        details = self._progress.get(run_id)
+        if not details:
+            return None
+        results = self.store.shop_run(run_id)["results"]
+        finished = sum(
+            1 for item in results if item.get("status") not in {"PENDING", "RUNNING"}
+        )
+        cached = sum(1 for item in results if item.get("cached"))
+        total = len(results)
+        pending = max(0, total - finished)
+        processed_live = max(0, finished - int(details.get("initial_cached") or 0))
+        elapsed = max(0.0, time.monotonic() - float(details["started_monotonic"]))
+        eta_seconds = None
+        if pending and processed_live > 0:
+            eta_seconds = round(elapsed / processed_live * pending)
+        return {
+            "mode": details["mode"],
+            "phase": details["phase"],
+            "phase_label": details["phase_label"],
+            "total": total,
+            "finished": finished,
+            "pending": pending,
+            "cached": cached,
+            "eta_seconds": eta_seconds,
+            "success_cache_ttl_seconds": details["success_cache_ttl_seconds"],
+            "negative_cache_ttl_seconds": details["negative_cache_ttl_seconds"],
+        }
+
     def stop(self) -> None:
         for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
+        self._progress.clear()

@@ -294,6 +294,24 @@ def test_shop_cache_and_protection_cooldown_persist_between_runs(tmp_path: Path)
     assert cached["price_eur"] == 176.4
     assert not store.shop_observation_pending("cache-target", source["id"], "bite")
 
+    store.register_monitoring_session("negative-source", False, [], run_mode="balanced")
+    store.start_shop_run("negative-source", [source], [shop])
+    store.finish_shop_observation(
+        "negative-source", source["id"], "bite", "NOT_FOUND",
+        search_url="https://www.bite.lt/paieska?q=TCL+25G64",
+        error="No matching product price was found",
+        collection_method="direct",
+    )
+    store.register_monitoring_session("negative-target", False, [], run_mode="quick")
+    store.start_shop_run(
+        "negative-target", [source], [shop], cache_ttl_seconds=0,
+        negative_cache_ttl_seconds=21_600,
+    )
+    negative = store.shop_run("negative-target")["results"][0]
+    assert negative["status"] == "NOT_FOUND"
+    assert negative["cached"] is True
+    assert store.monitoring_session("negative-target")["run_mode"] == "quick"
+
     store.register_monitoring_session("blocked-source", False, [])
     store.start_shop_run("blocked-source", [source], [shop])
     retry_after = store.pause_shop_for_protection("blocked-source", "bite", 3600, "Rate limited")
@@ -312,3 +330,22 @@ def test_shop_cache_and_protection_cooldown_persist_between_runs(tmp_path: Path)
     assert queued["retry_after"] == queued_retry_after == retry_after
     store.retry_shop_observation("blocked-target", source["id"], "bite")
     assert store.shop_run("blocked-target")["results"][0]["status"] == "PENDING"
+
+
+def test_existing_monitoring_sessions_migrate_to_balanced_mode(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "CREATE TABLE monitoring_sessions("
+            "run_id TEXT PRIMARY KEY,legacy_started INTEGER NOT NULL,"
+            "marketplace_keys TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,"
+            "stopped_at TEXT,cleared_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO monitoring_sessions(run_id,legacy_started,marketplace_keys,created_at) "
+            "VALUES('old-run',0,'[]','2026-08-01T00:00:00+00:00')"
+        )
+
+    store = CatalogStore(database)
+
+    assert store.monitoring_session("old-run")["run_mode"] == "balanced"

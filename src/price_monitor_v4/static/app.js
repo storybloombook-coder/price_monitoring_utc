@@ -1,5 +1,11 @@
 const byId = id => document.getElementById(id);
 const HIDDEN_COLUMNS_KEY = 'price-monitor-v4.hidden-columns';
+const RUN_MODE_KEY = 'price-monitor-v4.run-mode';
+const RUN_MODE_HELP = {
+  quick: 'Quick · 12 h success cache, 6 h Not found cache and direct collection only; browser-required checks are left for review.',
+  balanced: 'Balanced · recent cache, saved links first, then safe direct and browser-assisted discovery.',
+  deep: 'Deep · ignores result caches and performs a fresh full check with all configured fallbacks.'
+};
 const SHOP_METHODS = [
   ['auto', 'Auto · gentle fallback'], ['direct', 'Direct request'], ['background', 'Background Edge'],
   ['playwright', 'Playwright Edge'], ['extension', 'Browser extension'], ['manual', 'Manual discovery · saved links auto']
@@ -31,7 +37,7 @@ const state = {
   resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
   currentRunId: null, lastActionSignature: '', actionRenderSignature: '', actionItems: [], stopRequested: false,
-  historyLoading: false,
+  historyLoading: false, resultRenderSignature: '', lastRunStatus: null,
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
 
@@ -83,6 +89,17 @@ function badge(label, type, help = STATUS_HELP[type]) {
   return `<span class="badge ${escapeHtml(type)}"${tooltip}>${escapeHtml(label)}</span>`;
 }
 function statusClass(value) { return String(value || '').toLowerCase().replaceAll('_', '-'); }
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  if (value < 60) return `${value}s`;
+  const hours = Math.floor(value / 3600); const minutes = Math.ceil((value % 3600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+function updateRunModeHelp() {
+  const mode = byId('run-mode').value;
+  localStorage.setItem(RUN_MODE_KEY, mode);
+  byId('run-mode-help').textContent = RUN_MODE_HELP[mode] || RUN_MODE_HELP.balanced;
+}
 
 function itemStatus(item) {
   if (item.state === 'trash') return badge('Trash', 'trash');
@@ -389,7 +406,7 @@ function resultCounts(row) {
     notFound: statuses.filter(value => value === 'NOT_FOUND').length,
     actionRequired: statuses.filter(value => value === 'ACTION_REQUIRED').length,
     cooldown: statuses.filter(value => value === 'COOLDOWN').length,
-    cached: [...row.tasks, ...Object.values(row.shops)].filter(item => item.status === 'SUCCESS' && item.cached).length,
+    cached: [...row.tasks, ...Object.values(row.shops)].filter(item => item.cached).length,
     pending: statuses.filter(value => ['RUNNING', 'PENDING'].includes(value)).length
   };
 }
@@ -651,8 +668,7 @@ async function handleActionDialog(event) {
     const popover = button.closest('.action-popover'); if (popover) { popover.hidden = false; popover.classList.add('saved'); popover.innerHTML = `<span class="popover-success">${CHECK_ICON} ${escapeHtml(message)}</span>`; }
     await pollRun(state.currentRunId);
     if (action === 'retry' || action === 'wait' || action === 'confirm-link') {
-      if (state.runPoll) clearInterval(state.runPoll);
-      state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+      scheduleRunPolling(state.currentRunId, 1000);
     }
   } catch (error) {
     button.disabled = false;
@@ -729,10 +745,18 @@ async function saveResultCorrection(status) {
 function renderRun(run) {
   state.currentRunId = run.id || run.run_id;
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
+  state.lastRunStatus = run.status;
+  const resultSignature = JSON.stringify([
+    state.tasks.map(item => [item.item_id, item.marketplace_key || item.marketplace, item.status, item.cheapest_in_stock, item.cheapest_pre_order, item.error, item.cached, item.finished_at]),
+    state.shopResults.map(item => [item.item_id, item.shop_key, item.status, item.price_eur, item.availability, item.product_url, item.search_url, item.error, item.retry_after, item.cached, item.checked_at]),
+  ]);
+  const resultsChanged = resultSignature !== state.resultRenderSignature;
+  state.resultRenderSignature = resultSignature;
   if (run.cleared) {
     byId('progress').hidden = true;
     byId('run-state').textContent = 'Table cleared.';
     byId('start-run').disabled = false;
+    byId('run-mode').disabled = false;
     byId('clear-run').disabled = true;
     byId('export-run').disabled = true;
     byId('stop-run').hidden = true;
@@ -746,17 +770,37 @@ function renderRun(run) {
   const notFound = all.filter(item => item.status === 'NOT_FOUND').length;
   const actionRequired = all.filter(item => item.status === 'ACTION_REQUIRED').length;
   const cooldown = all.filter(item => item.status === 'COOLDOWN').length;
-  const cached = all.filter(item => item.status === 'SUCCESS' && item.cached).length;
+  const cached = all.filter(item => item.cached).length;
   const percent = all.length ? Math.round(finished / all.length * 100) : (run.status === 'COMPLETE' ? 100 : 0);
   byId('progress').hidden = false; byId('progress-fill').style.width = `${percent}%`; byId('progress-text').textContent = `${run.status}: ${finished} of ${all.length} checks (${percent}%)`;
+  const execution = run.execution || {};
+  const mode = String(run.run_mode || execution.mode || 'balanced');
+  const eta = execution.eta_seconds == null ? '' : ` · ETA about ${formatDuration(execution.eta_seconds)}`;
+  const queue = execution.total == null ? '' : ` · direct shops ${execution.finished || 0}/${execution.total}`;
+  byId('progress-detail').textContent = `${mode[0].toUpperCase()}${mode.slice(1)} · ${execution.phase_label || (run.status === 'RUNNING' ? 'Monitoring sources' : 'Monitoring complete')}${queue}${eta}`;
   const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); loadMonitoringHistory(); }
 }
 
-async function pollRun(runId) { try { renderRun(await api(`/runs/${runId}`)); } catch (error) { if (!state.stopRequested) showBanner('error', error.message); } }
+async function pollRun(runId) {
+  try { const run = await api(`/runs/${runId}`); renderRun(run); return run; }
+  catch (error) { if (!state.stopRequested) showBanner('error', error.message); return null; }
+}
+function pollingDelay() {
+  const total = state.tasks.length + state.shopResults.length;
+  return total >= 600 ? 6000 : total >= 300 ? 4000 : 2000;
+}
+function scheduleRunPolling(runId, delay = pollingDelay()) {
+  if (state.runPoll) clearTimeout(state.runPoll);
+  state.runPoll = window.setTimeout(async () => {
+    state.runPoll = null;
+    const run = await pollRun(runId);
+    if (run?.status === 'RUNNING' && !state.stopRequested) scheduleRunPolling(runId);
+  }, delay);
+}
 async function refreshOneModel(event) {
   const button = event.target.closest('[data-refresh-model]');
   if (!button || !state.currentRunId) return;
@@ -766,8 +810,7 @@ async function refreshOneModel(event) {
     showBanner('success', result.checks_started ? `Refreshing ${result.checks_started} enabled checks for this model.` : 'No enabled direct checks are available for this model.');
     await pollRun(state.currentRunId);
     if (result.checks_started) {
-      if (state.runPoll) clearInterval(state.runPoll);
-      state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
+      scheduleRunPolling(state.currentRunId, 1000);
     }
   } catch (error) { button.disabled = false; button.classList.remove('spinning'); showBanner('error', error.message); }
 }
@@ -781,7 +824,8 @@ async function loadMonitoringHistory() {
     byId('monitoring-history').innerHTML = runs.length ? runs.map(run => {
       const checks = Number(run.shop_checks || 0) + Number(run.assisted_checks || 0);
       const current = run.run_id === state.currentRunId ? ' current' : '';
-      return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString('en-GB'))}</strong><span>${badge(run.status, statusClass(run.status))} · ${checks} direct / assisted checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
+      const mode = String(run.run_mode || 'balanced');
+      return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString('en-GB'))}</strong><span>${badge(run.status, statusClass(run.status))} · ${escapeHtml(mode[0].toUpperCase() + mode.slice(1))} · ${checks} direct / assisted checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
     }).join('') : '<span class="muted">No monitoring runs yet.</span>';
   } catch (error) { byId('monitoring-history').classList.add('muted'); byId('monitoring-history').textContent = `History unavailable: ${error.message}`; }
   finally { state.historyLoading = false; }
@@ -797,9 +841,10 @@ async function openHistoryRun(event) {
 }
 
 async function startRun() {
-  byId('start-run').disabled = true; byId('export-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
-  try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); await loadMonitoringHistory(); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
-  catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
+  byId('start-run').disabled = true; byId('run-mode').disabled = true; byId('export-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.resultRenderSignature = ''; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+  const mode = byId('run-mode').value;
+  try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode }) }); await pollRun(result.run_id); await loadMonitoringHistory(); scheduleRunPolling(result.run_id); }
+  catch (error) { byId('start-run').disabled = false; byId('run-mode').disabled = false; showBanner('error', error.message); }
 }
 
 async function hardStopRun() {
@@ -861,16 +906,18 @@ function wireEvents() {
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
+  byId('run-mode').addEventListener('change', updateRunModeHelp);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
 }
 
 async function initialize() {
+  const savedMode = localStorage.getItem(RUN_MODE_KEY); if (RUN_MODE_HELP[savedMode]) byId('run-mode').value = savedMode; updateRunModeHelp();
   wireEvents();
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · monitoring service ${health.legacy_service}`; byId('service-state').classList.add('ok');
-    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h shop cache · ${Math.round(policy.assisted_marketplace_cache_ttl_seconds / 3600)} h assisted cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
-    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge(), loadMonitoringHistory()]); try { renderRun(await api('/runs/latest')); await loadMonitoringHistory(); } catch { renderResults(); }
+    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = `Polite mode · 1 request per shop · ${policy.browser_concurrency} cross-shop browser slots · ${policy.delay_seconds[0]}–${policy.delay_seconds[1]} s pacing · ${Math.round(policy.cache_ttl_seconds / 3600)} h price cache · ${Math.round(policy.negative_cache_ttl_seconds / 3600)} h Not found cache · ${Math.round(policy.cooldown_seconds / 60)} min protection cooldown`;
+    await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge(), loadMonitoringHistory()]); try { const latest = await api('/runs/latest'); renderRun(latest); if (latest.status === 'RUNNING') scheduleRunPolling(latest.id || latest.run_id); await loadMonitoringHistory(); } catch { renderResults(); }
     setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }
 }

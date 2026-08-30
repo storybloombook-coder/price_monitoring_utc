@@ -188,9 +188,14 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .switch-row input:focus-visible + .switch { outline: 3px solid color-mix(in srgb, var(--brand) 25%, transparent); }
 .switch-row:active .switch { transform: scale(.96); }
 .run-actions { margin-bottom: 12px; }
+.run-mode-control { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 750; }
+.run-mode-control select { width: auto; min-width: 112px; padding: 7px 28px 7px 9px; font-weight: 700; }
+.run-mode-help { margin: -5px 0 10px; color: var(--muted); font-size: 11px; }
 .progress-block { margin: 12px 0; }
 .progress-track { height: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
 .progress-fill { width: 0; height: 100%; background: var(--brand); transition: width .35s ease; }
+.progress-block p { margin: 7px 0 0; }
+.progress-detail { font-size: 11px; }
 .footer-grid { margin-top: 18px; }
 .run-history { margin-top: 18px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); }
 .run-history .panel-heading { align-items: center; margin-bottom: 8px; }

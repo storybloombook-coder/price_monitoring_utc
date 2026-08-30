@@ -1,4 +1,4 @@
-# Price Monitor 4.2.3
+# Price Monitor 4.2.4
 
 Local-first Windows application for TCL marketplace and direct-shop price monitoring. Version 4 adds an editable catalog, per-source controls, compact model-level results, and direct retailer checks while preserving Excel import and local SQLite history.
 
@@ -47,6 +47,14 @@ The **Test** button beside a shop runs exactly one selected method against one m
 
 The monitoring table keeps one row per model. A matching stock record does not create another network check: active monitoring models are the only task source, while stock quantity and unit cost are merged into the same canonical SKU row. Duplicate active monitoring models are rejected. Marketplace and shop discovery queries use `TCL <model>` without duplicating an existing TCL prefix, while exact SKU matching remains mandatory. Marketplace and shop cells expand to show individual offers, availability, links, timestamps, and errors. All table filters accept multiple values. Columns can be shown or hidden from the **Columns** menu; column visibility is retained in the browser. Use **Hard stop** to cancel a stuck run while preserving completed results.
 
+Before starting, choose a run mode:
+
+- **Quick** reuses successful observations for up to 12 hours and `Not found` observations for 6 hours, then runs direct collection only. Checks that need browser rendering are left in **Action required** for selective review.
+- **Balanced** (recommended) reuses the normal 4-hour success cache and 6-hour `Not found` cache, checks saved product links first, then uses safe browser-assisted discovery where needed.
+- **Deep** ignores observation caches and performs a fresh full check with every configured fallback.
+
+Saved-link work is completed before broad discovery. Different retailer domains can use up to two browser render slots in parallel, while requests to each individual retailer remain sequential and paced. On large runs, the interface polls less frequently and skips rebuilding the table when no result changed; it also shows the active phase and an approximate direct-shop ETA.
+
 After a run finishes, **Export table to Excel** downloads that exact opened run, including historical runs. The summary and offer-detail worksheets use an A4 landscape print setup fitted to one page horizontally.
 
 If the Edge extension is connected, protected pages are automatically delegated to a visible normal-browser tab. Without the extension, or when a human verification times out, the check is reported as **Action required** instead of a generic failure. Expand the retailer cell and choose **Open verification** to inspect the price manually.
@@ -59,7 +67,7 @@ Status badges include hover/focus explanations throughout the catalog, stock tab
 
 ### Polite monitoring
 
-Direct-shop collection uses one sequential request stream per retailer with an 8–15 second delay. Fresh successful observations are reused for four hours and clearly marked **Cached**. A `429`, Cloudflare challenge, or blocked browser verification pauses the retailer for at least one hour (or the server's `Retry-After` value); remaining checks are marked **Cooldown** with the next retry time. The review window then offers two safe choices: wait until that timestamp and retry automatically, or enter a manual price/not-found result immediately. Other retailer domains can continue independently. Marketplace concurrency defaults to one.
+Direct-shop collection uses one sequential request stream per retailer with an 8–15 second delay. In Balanced mode, fresh successful observations are reused for four hours and recent `Not found` observations for six hours; both are clearly marked **Cached**. A `429`, Cloudflare challenge, or blocked browser verification pauses the retailer for at least one hour (or the server's `Retry-After` value); remaining checks are marked **Cooldown** with the next retry time. The review window then offers two safe choices: wait until that timestamp and retry automatically, or enter a manual price/not-found result immediately. Other retailer domains can continue independently. Marketplace concurrency defaults to one.
 
 ## Configuration
 
@@ -93,6 +101,6 @@ Live marketplace collection is enabled by default (`ENABLE_LIVE_MARKETPLACES=tru
 ./build-v4.ps1
 ```
 
-The default build command updates the stable portable directory `dist/PriceMonitor-v4.0.0-windows-x64-portable` in place (the application itself reports version 4.2.3). Keeping this directory stable preserves local data and the unpacked Edge extension path. It does not create a ZIP file. Use `./build-v4.ps1 -Archive` only when an archive is explicitly needed.
+The default build command updates the stable portable directory `dist/PriceMonitor-v4.0.0-windows-x64-portable` in place (the application itself reports version 4.2.4). Keeping this directory stable preserves local data and the unpacked Edge extension path. It does not create a ZIP file. Use `./build-v4.ps1 -Archive` only when an archive is explicitly needed.
 
 The Python source for the v4 catalog, API, launcher, and interface is reproducible from this repository. Marketplace collection is temporarily delegated to the supplied v3 executable in an isolated internal service because the original v3 adapter source was not present in the supplied folder.

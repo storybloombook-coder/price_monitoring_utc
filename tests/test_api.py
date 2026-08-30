@@ -63,9 +63,11 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "4.2.3"
+        assert health.json()["version"] == "4.2.4"
         assert health.json()["browser_bridge"]["connected"] is False
         assert health.json()["polite_monitoring"]["per_shop_concurrency"] == 1
+        assert health.json()["polite_monitoring"]["browser_concurrency"] == 2
+        assert health.json()["polite_monitoring"]["negative_cache_ttl_seconds"] == 21_600
         assert client.post("/browser-bridge/heartbeat").status_code == 403
         heartbeat = client.post("/browser-bridge/heartbeat", headers={"origin": EXTENSION_ORIGIN})
         assert heartbeat.status_code == 200
@@ -114,10 +116,14 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert client.patch("/sources/varle", json={"collection_method": "legacy"}).status_code == 400
         client.patch("/sources/master/marketplace", json={"enabled": False})
         client.patch("/sources/master/shop", json={"enabled": False})
-        started = client.post("/runs", json={})
+        assert client.post("/runs", json={"mode": "turbo"}).status_code == 400
+        started = client.post("/runs", json={"mode": "quick"})
         assert started.status_code == 200
+        assert started.json()["mode"] == "quick"
         run = client.get(f"/runs/{started.json()['run_id']}").json()
         assert run["status"] == "COMPLETE"
+        assert run["run_mode"] == "quick"
+        assert run["execution"]["mode"] == "quick"
         assert run["tasks"] == []
         assert run["shop_results"] == []
         export_path = Path(run["export_path"])
@@ -158,6 +164,7 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert client.get("/runs/latest").json()["cleared"] is True
         history = client.get("/monitoring-history").json()
         assert history[0]["run_id"] == "manual-stop-test"
+        assert history[0]["run_mode"] == "balanced"
         invalid_link = client.post(
             f"/runs/manual-stop-test/shops/{source['id']}/bite/link",
             json={"url": "https://example.com/not-bite"},
