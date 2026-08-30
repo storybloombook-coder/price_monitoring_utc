@@ -4,6 +4,19 @@ from dataclasses import asdict, dataclass
 from urllib.parse import quote_plus
 
 
+def search_phrase(model: str) -> str:
+    """Use the TCL brand in discovery queries without duplicating it."""
+    value = " ".join(str(model or "").strip().split())
+    upper = value.upper()
+    if upper == "TCL":
+        return "TCL"
+    if upper.startswith("TCL ") or upper.startswith("TCL-") or upper.startswith("TCL_"):
+        value = value[4:].strip()
+    elif upper.startswith("TCL") and len(value) > 3 and any(char.isdigit() for char in value[3:]):
+        value = value[3:].strip()
+    return f"TCL {value}".strip()
+
+
 @dataclass(frozen=True)
 class MonitoringSource:
     key: str
@@ -16,7 +29,7 @@ class MonitoringSource:
     def search_url(self, model: str) -> str | None:
         if not self.search_template:
             return None
-        return self.search_template.format(query=quote_plus(model.strip()))
+        return self.search_template.format(query=quote_plus(search_phrase(model)))
 
     def as_dict(self) -> dict[str, str | None]:
         return asdict(self)

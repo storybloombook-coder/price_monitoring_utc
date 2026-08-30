@@ -63,7 +63,7 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "4.2.2"
+        assert health.json()["version"] == "4.2.3"
         assert health.json()["browser_bridge"]["connected"] is False
         assert health.json()["polite_monitoring"]["per_shop_concurrency"] == 1
         assert client.post("/browser-bridge/heartbeat").status_code == 403
@@ -122,6 +122,11 @@ def test_catalog_api_and_v4_health(tmp_path: Path) -> None:
         assert run["shop_results"] == []
         export_path = Path(run["export_path"])
         assert export_path.exists()
+        exported = client.get(f"/runs/{started.json()['run_id']}/export")
+        assert exported.status_code == 200
+        assert exported.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
         workbook = load_workbook(export_path, read_only=True)
         headers = [cell.value for cell in next(workbook["Monitoring summary"].iter_rows())]
         assert headers[3:12] == [

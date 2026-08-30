@@ -536,7 +536,7 @@ function renderResults() {
 }
 
 function renderActionRequired(run) {
-  const shopItems = state.shopResults.filter(item => item.status === 'ACTION_REQUIRED' && shopResultVisible(item)).map(item => ({ ...item, action_kind: 'shops', action_key: item.shop_key, action_name: item.shop_name || item.shop_key }));
+  const shopItems = state.shopResults.filter(item => ['ACTION_REQUIRED', 'COOLDOWN'].includes(item.status) && shopResultVisible(item)).map(item => ({ ...item, action_kind: 'shops', action_key: item.shop_key, action_name: item.shop_name || item.shop_key }));
   const marketplaceItems = state.tasks.filter(item => item.status === 'ACTION_REQUIRED' && item.assisted && marketplaceTaskVisible(item)).map(item => ({ ...item, model: item.source_model || item.canonical_model, action_kind: 'marketplaces', action_key: item.marketplace_key, action_name: item.marketplace || item.marketplace_key }));
   const items = [...shopItems, ...marketplaceItems];
   state.actionItems = items;
@@ -550,6 +550,8 @@ function renderActionRequired(run) {
     error: item.error || '',
     product_url: item.product_url || '',
     search_url: item.search_url || '',
+    status: item.status,
+    retry_after: item.retry_after || '',
     previous: item.previous_manual_resolution || null,
   })));
   if (renderSignature !== state.actionRenderSignature) {
@@ -562,7 +564,13 @@ function renderActionRequired(run) {
     const sellerField = item.action_kind === 'marketplaces' && item.action_key === 'salidzini'
       ? `<label>Seller / shop<input data-action-field="seller" autocomplete="off" value="${escapeHtml(previous.seller_name || '')}" placeholder="For example, RD Electronics" required></label>` : '';
     const attrs = `data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}"`;
-    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${previousDecisionHtml(item.previous_manual_resolution)}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}<button type="button" data-check-action="retry" ${attrs}>Capture again</button>
+    const cooldown = Boolean(item.retry_after);
+    const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : '';
+    const retryAction = cooldown
+      ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
+      : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;
+    const cooldownChoice = cooldown ? `<span class="action-cooldown-choice">Paused until ${escapeHtml(retryAt)}. Choose automatic waiting or enter a manual result now.</span>` : '';
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}${retryAction}
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" value="${escapeHtml(previousPrice)}" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
@@ -626,21 +634,23 @@ async function handleActionDialog(event) {
   }
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = action === 'retry' ? 'Capturing…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
+  button.textContent = action === 'retry' ? 'Capturing…' : action === 'wait' ? 'Scheduling…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
   try {
     const base = `/runs/${encodeURIComponent(state.currentRunId)}/${button.dataset.checkKind}/${button.dataset.itemId}/${encodeURIComponent(button.dataset.sourceKey)}`;
     if (action === 'retry') {
       await api(`${base}/retry`, { method: 'POST' });
+    } else if (action === 'wait') {
+      await api(`${base}/wait`, { method: 'POST' });
     } else if (action === 'confirm-link') {
       await api(`${base}/link`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     } else {
       await api(`${base}/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     }
     state.lastActionSignature = '';
-    const message = action === 'retry' ? 'The selected check is capturing again.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
+    const message = action === 'retry' ? 'The selected check is capturing again.' : action === 'wait' ? 'The check will retry automatically when the cooldown ends.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
     const popover = button.closest('.action-popover'); if (popover) { popover.hidden = false; popover.classList.add('saved'); popover.innerHTML = `<span class="popover-success">${CHECK_ICON} ${escapeHtml(message)}</span>`; }
     await pollRun(state.currentRunId);
-    if (action === 'retry' || action === 'confirm-link') {
+    if (action === 'retry' || action === 'wait' || action === 'confirm-link') {
       if (state.runPoll) clearInterval(state.runPoll);
       state.runPoll = setInterval(() => pollRun(state.currentRunId), 2000);
     }
@@ -724,6 +734,7 @@ function renderRun(run) {
     byId('run-state').textContent = 'Table cleared.';
     byId('start-run').disabled = false;
     byId('clear-run').disabled = true;
+    byId('export-run').disabled = true;
     byId('stop-run').hidden = true;
     byId('stop-run').disabled = false;
     renderResults(); renderActionRequired(run);
@@ -741,7 +752,7 @@ function renderRun(run) {
   const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING' && state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; loadExports(); loadMonitoringHistory(); }
 }
 
@@ -786,7 +797,7 @@ async function openHistoryRun(event) {
 }
 
 async function startRun() {
-  byId('start-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+  byId('start-run').disabled = true; byId('export-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
   try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); await pollRun(result.run_id); await loadMonitoringHistory(); if (state.runPoll) clearInterval(state.runPoll); state.runPoll = setInterval(() => pollRun(result.run_id), 2000); }
   catch (error) { byId('start-run').disabled = false; showBanner('error', error.message); }
 }
@@ -819,6 +830,15 @@ async function clearCurrentTable() {
   } finally { button.textContent = 'Clear table'; }
 }
 
+function exportCurrentRun() {
+  if (!state.currentRunId || byId('export-run').disabled) return;
+  const link = document.createElement('a');
+  link.href = `/runs/${encodeURIComponent(state.currentRunId)}/export`;
+  link.download = '';
+  document.body.appendChild(link); link.click(); link.remove();
+  showBanner('success', 'Excel export started. The summary is fitted to one printed page horizontally.');
+}
+
 async function loadExports() {
   try { const items = await api('/exports?limit=6'); byId('exports').innerHTML = items.length ? items.map(item => `<div class="export-line"><a href="/exports/file/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a> · ${Math.round(item.size_bytes / 1024)} KB</div>`).join('') : 'No exports yet.'; }
   catch { byId('exports').textContent = 'Exports are unavailable.'; }
@@ -840,7 +860,7 @@ function wireEvents() {
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun);
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
 }

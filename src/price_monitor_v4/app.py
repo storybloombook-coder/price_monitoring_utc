@@ -580,6 +580,11 @@ def create_app(
                 task.setdefault("item_id", item["id"])
             if not item:
                 continue
+            # The private legacy engine searches with "TCL <model>". Keep the
+            # public result keyed by the original catalog model so shops, stock,
+            # and marketplaces still collapse into one row.
+            task["canonical_model"] = item["canonical_model"]
+            task["source_model"] = item["model"]
             marketplace_name = str(task.get("marketplace") or "")
             source = next(
                 (
@@ -675,6 +680,16 @@ def create_app(
     async def run_status(run_id: str) -> JSONResponse:
         return JSONResponse(await merged_run(run_id))
 
+    @app.get("/runs/{run_id}/export")
+    async def export_run(run_id: str) -> FileResponse:
+        run = await merged_run(run_id)
+        if run.get("status") == "RUNNING":
+            raise HTTPException(409, "Wait until monitoring finishes before exporting the final table")
+        path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        if not path.exists():
+            write_monitoring_export(path, run, catalog.list_items("source", "active"))
+        return FileResponse(path, filename=path.name)
+
     @app.post("/runs/{run_id}/stop")
     async def stop_run(run_id: str) -> JSONResponse:
         session = catalog.monitoring_session(run_id)
@@ -718,6 +733,25 @@ def create_app(
         export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
         export_path.unlink(missing_ok=True)
         return {"run_id": run_id, "item_id": item_id, "shop_key": shop_key, "status": "PENDING"}
+
+    @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/wait")
+    async def wait_for_shop_cooldown(
+        run_id: str, item_id: int, shop_key: str
+    ) -> dict[str, Any]:
+        try:
+            shop_monitor.retry(
+                run_id, item_id, shop_key, wait_for_cooldown=True
+            )
+        except KeyError as error:
+            raise HTTPException(404, "Shop observation not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        export_path = app_settings.exports_dir / f"PriceMonitor-v4-{safe_filename(run_id)}.xlsx"
+        export_path.unlink(missing_ok=True)
+        return {
+            "run_id": run_id, "item_id": item_id, "shop_key": shop_key,
+            "status": "PENDING", "mode": "wait_for_cooldown",
+        }
 
     @app.post("/runs/{run_id}/shops/{item_id}/{shop_key}/link")
     async def save_shop_link(

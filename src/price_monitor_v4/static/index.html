@@ -11,7 +11,7 @@
     <header class="app-header">
       <div>
         <p class="eyebrow">UTC MARKET INTELLIGENCE</p>
-        <h1>Price Monitor <span class="version">v4.2.2</span></h1>
+        <h1>Price Monitor <span class="version">v4.2.3</span></h1>
         <p class="lead">Flexible product, stock and price monitoring in one workspace.</p>
       </div>
       <div id="service-state" class="service-state">Starting services…</div>
@@ -68,7 +68,7 @@
         <section><div class="source-group-heading"><div><h3>Marketplaces</h3><span class="muted">Comparison platforms</span></div><label class="switch-row">All marketplaces <input id="marketplace-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="marketplace-list" class="source-list"></div></section>
         <section><div class="source-group-heading"><div><h3>Shops</h3><span class="muted">Direct retailer monitoring</span></div><label class="switch-row">All shops <input id="shop-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="shop-list" class="country-list"></div></section>
       </div>
-      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span></div>
+      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span><button id="export-run" type="button" class="secondary export-run-button" disabled>Export table to Excel</button></div>
       <div id="progress" class="progress-block" hidden><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><p id="progress-text" class="muted"></p></div>
       <div class="result-toolbar">
         <details id="model-filter" class="multi-filter"><summary>Models</summary><div class="filter-menu"></div></details>
@@ -106,7 +106,7 @@
   </form></dialog>
   <dialog id="action-dialog" class="action-dialog">
     <div class="dialog-heading"><div><p class="eyebrow">BROWSER VERIFICATION</p><h2>Action required</h2></div><button id="action-close" type="button" class="icon-button" aria-label="Close">×</button></div>
-    <p class="muted">Opening a retailer does not change the result by itself. After checking the page, capture it again, mark the model as not found, or save the price manually.</p>
+    <p class="muted">For protected sources, either wait for the cooldown and retry automatically, or confirm the result manually now. Opening a retailer does not change the result by itself.</p>
     <div id="action-items" class="action-items"></div>
     <div class="dialog-actions"><button id="action-later" type="button" class="secondary">Later</button></div>
   </dialog>

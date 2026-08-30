@@ -612,6 +612,7 @@ class ShopMonitor:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._browser_semaphore = asyncio.Semaphore(1)
         self._extension_semaphore = asyncio.Semaphore(1)
+        self._retry_locks: dict[str, asyncio.Lock] = {}
         self._browser_blocked: set[str] = set()
         self._extension_blocked: set[str] = set()
 
@@ -959,6 +960,7 @@ class ShopMonitor:
         *,
         method_override: str | None = None,
         link_only: bool = False,
+        wait_for_cooldown: bool = False,
     ) -> None:
         model = self.store.get_item(item_id)
         shop = next(
@@ -971,9 +973,15 @@ class ShopMonitor:
         if task_key in self._tasks:
             raise ValueError("This shop check is already running")
         self.store.ensure_shop_observation(run_id, item_id, shop_key)
-        self.store.retry_shop_observation(run_id, item_id, shop_key)
-        self._extension_blocked.discard(shop_key)
-        self._browser_blocked.discard(shop_key)
+        retry_after = None
+        if wait_for_cooldown:
+            retry_after = self.store.queue_shop_observation_after_cooldown(
+                run_id, item_id, shop_key
+            )
+        else:
+            self.store.retry_shop_observation(run_id, item_id, shop_key)
+            self._extension_blocked.discard(shop_key)
+            self._browser_blocked.discard(shop_key)
 
         async def run_retry() -> None:
             renderer = EdgeRenderer(self.timeout_seconds)
@@ -985,14 +993,32 @@ class ShopMonitor:
                 "Accept-Language": "en-US,en;q=0.9,lt;q=0.8,et;q=0.7",
             }
             try:
-                async with httpx.AsyncClient(
-                    timeout=self.timeout_seconds, follow_redirects=True, headers=headers
-                ) as client:
-                    await self._check_one(
-                        client, renderer, run_id, model, shop, playwright_renderer,
-                        method_override=method_override,
-                        link_only=link_only,
-                    )
+                if retry_after:
+                    try:
+                        resume_at = datetime.fromisoformat(retry_after)
+                        if resume_at.tzinfo is None:
+                            resume_at = resume_at.replace(tzinfo=UTC)
+                        await asyncio.sleep(max(0, (resume_at - datetime.now(UTC)).total_seconds()))
+                    except ValueError:
+                        pass
+                    self.store.retry_shop_observation(run_id, item_id, shop_key)
+                    self._extension_blocked.discard(shop_key)
+                    self._browser_blocked.discard(shop_key)
+                retry_lock = self._retry_locks.setdefault(shop_key, asyncio.Lock())
+                queued_behind_retry = retry_lock.locked()
+                async with retry_lock:
+                    if queued_behind_retry:
+                        await asyncio.sleep(random.uniform(
+                            self.request_delay_min_seconds, self.request_delay_max_seconds
+                        ))
+                    async with httpx.AsyncClient(
+                        timeout=self.timeout_seconds, follow_redirects=True, headers=headers
+                    ) as client:
+                        await self._check_one(
+                            client, renderer, run_id, model, shop, playwright_renderer,
+                            method_override=method_override,
+                            link_only=link_only,
+                        )
             finally:
                 await renderer.close()
                 await playwright_renderer.close()

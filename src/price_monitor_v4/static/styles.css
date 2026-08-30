@@ -42,6 +42,7 @@ a { color: var(--blue); }
 .setup-grid, .catalog-grid, .footer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .upload-panel, .catalog-panel { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
 .file-row, .toolbar, .run-actions, .dialog-actions, .marketplaces { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.export-run-button { margin-left: auto; }
 .file-row { margin: 12px 0 8px; }
 button, input, select { font: inherit; }
 button { border: 1px solid var(--brand); background: var(--brand); color: #fff; padding: 8px 13px; border-radius: 8px; cursor: pointer; font-weight: 650; }
@@ -121,6 +122,7 @@ input[type="search"], input[type="text"], input[type="number"], input[type="url"
 .detail-error { color: var(--danger); max-width: 240px; white-space: normal; }
 .cache-note { color: var(--blue); }
 .cooldown-note { color: var(--warn); font-weight: 700; }
+.action-cooldown-choice { color: var(--warn); font-weight: 700; }
 .result-row-filtered { display: none; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 12.5px; }

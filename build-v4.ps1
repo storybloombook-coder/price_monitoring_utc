@@ -69,7 +69,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
 
     New-Item -ItemType Directory -Path $pmPortableRoot -Force | Out-Null
-    foreach ($pmBuildAsset in @('PriceMonitor.exe', '_internal', 'legacy', 'README.md', '.env.example')) {
+    foreach ($pmBuildAsset in @('PriceMonitor.exe', '_internal', 'legacy', 'README.md', 'README-RU.md', '.env.example')) {
         $pmAssetPath = Join-Path $pmPortableRoot $pmBuildAsset
         if (Test-Path -LiteralPath $pmAssetPath) {
             Remove-Item -LiteralPath $pmAssetPath -Recurse -Force
@@ -83,6 +83,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $pmRoot 'PriceMonitor.exe') -Destination (Join-Path $pmLegacyRoot 'PriceMonitor-v3.exe')
     Copy-Item -LiteralPath (Join-Path $pmRoot '_internal') -Destination (Join-Path $pmLegacyRoot '_internal') -Recurse
     Copy-Item -LiteralPath (Join-Path $pmRoot 'README.md') -Destination $pmPortableRoot
+    Copy-Item -LiteralPath (Join-Path $pmRoot 'README-RU.md') -Destination $pmPortableRoot
     Copy-Item -LiteralPath (Join-Path $pmRoot '.env.example') -Destination $pmPortableRoot
     $pmExtensionRoot = Join-Path $pmPortableRoot 'edge-extension'
     New-Item -ItemType Directory -Path $pmExtensionRoot -Force | Out-Null
@@ -94,7 +95,15 @@ try {
         PortableFolder = $pmPortableRoot
     }
     if ($Archive) {
-        Compress-Archive -LiteralPath $pmPortableRoot -DestinationPath $pmArchive -CompressionLevel Optimal
+        # The stable portable directory intentionally preserves local runtime data.
+        # A shareable archive must never include that catalog/history or a private .env.
+        $pmArchiveStageRoot = Join-Path $pmBuildRoot 'archive-stage'
+        $pmArchivePortableRoot = Join-Path $pmArchiveStageRoot $pmPortableName
+        New-Item -ItemType Directory -Path $pmArchivePortableRoot -Force | Out-Null
+        Get-ChildItem -LiteralPath $pmPortableRoot -Force |
+            Where-Object { $_.Name -notin @('var', '.env') } |
+            Copy-Item -Destination $pmArchivePortableRoot -Recurse -Force
+        Compress-Archive -LiteralPath $pmArchivePortableRoot -DestinationPath $pmArchive -CompressionLevel Optimal
         $pmHash = Get-FileHash -LiteralPath $pmArchive -Algorithm SHA256
         $pmResult.Archive = $pmArchive
         $pmResult.ArchiveSizeMB = [math]::Round((Get-Item -LiteralPath $pmArchive).Length / 1MB, 2)

@@ -2,9 +2,9 @@ from pathlib import Path
 import sqlite3
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
-from price_monitor_v4.catalog import CatalogStore
+from price_monitor_v4.catalog import CatalogStore, canonicalize
 
 
 def make_source_workbook(path: Path) -> None:
@@ -80,7 +80,7 @@ def test_prepare_legacy_filters_paused_and_trashed_items(tmp_path: Path) -> None
     import sqlite3
 
     workbook = load_workbook(active_book, data_only=True)
-    assert [row[0].value for row in workbook["TV"].iter_rows(min_row=2)] == [active["model"]]
+    assert [row[0].value for row in workbook["TV"].iter_rows(min_row=2)] == [f"TCL {active['model']}"]
     assert [row[0].value for row in workbook["SB"].iter_rows(min_row=2)] == []
     with sqlite3.connect(legacy_db) as db:
         rows = db.execute("SELECT nomenclature, canonical_model FROM stock_items").fetchall()
@@ -152,6 +152,24 @@ def test_stock_item_can_be_promoted_and_trash_can_be_deleted_permanently(tmp_pat
     store.delete_item_permanently(promoted["id"])
     with pytest.raises(KeyError):
         store.get_item(promoted["id"])
+
+
+def test_tcl_prefix_is_the_same_catalog_sku_and_legacy_search_uses_brand(tmp_path: Path) -> None:
+    store = CatalogStore(tmp_path / "catalog.sqlite3")
+    source = store.create_item("source", {"model": "65C8L", "source_sheets": ["TV"]})
+    stock = store.create_item("stock", {"nomenclature": "TCL TV", "model": "TCL 65C8L"})
+
+    assert canonicalize("TCL 65C8L") == canonicalize("65C8L") == "65C8L"
+    assert store.get_item(stock["id"])["matched"] is True
+    with pytest.raises(ValueError, match="already exists"):
+        store.create_item("source", {"model": "TCL 65C8L"})
+
+    workbook_path = tmp_path / "legacy-search.xlsx"
+    store._write_active_workbook(workbook_path)
+    workbook = load_workbook(workbook_path, data_only=True, read_only=True)
+    values = [cell for (cell,) in workbook["TV"].iter_rows(min_row=2, values_only=True)]
+    assert values == ["TCL 65C8L"]
+    assert source["canonical_model"] == "65C8L"
 
 
 def test_action_required_shop_observation_can_be_retried(tmp_path: Path) -> None:
@@ -286,5 +304,11 @@ def test_shop_cache_and_protection_cooldown_persist_between_runs(tmp_path: Path)
     store.register_monitoring_session("blocked-target", False, [])
     store.start_shop_run("blocked-target", [source], [shop], cache_ttl_seconds=0)
     assert store.shop_run("blocked-target")["results"][0]["status"] == "COOLDOWN"
+    queued_retry_after = store.queue_shop_observation_after_cooldown(
+        "blocked-target", source["id"], "bite"
+    )
+    queued = store.shop_run("blocked-target")["results"][0]
+    assert queued["status"] == "PENDING"
+    assert queued["retry_after"] == queued_retry_after == retry_after
     store.retry_shop_observation("blocked-target", source["id"], "bite")
     assert store.shop_run("blocked-target")["results"][0]["status"] == "PENDING"

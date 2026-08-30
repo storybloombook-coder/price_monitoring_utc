@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
 
-from .sources import SOURCE_BY_KEY, SOURCES
+from .sources import SOURCE_BY_KEY, SOURCES, search_phrase
 
 
 SOURCE_SHEETS = ("TV", "SB", "Monitors")
@@ -24,7 +24,12 @@ def utc_now() -> str:
 
 def canonicalize(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value or "").upper().strip()
-    return re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    if normalized.startswith(("TCL ", "TCL-", "TCL_")):
+        normalized = normalized[4:].strip()
+    elif normalized.startswith("TCL") and any(char.isdigit() for char in normalized[3:]):
+        normalized = normalized[3:].strip()
+    return normalized
 
 
 def number(value: Any, default: float = 0.0) -> float:
@@ -1028,6 +1033,30 @@ class CatalogStore:
                 raise KeyError((run_id, item_id, shop_key))
             db.execute("DELETE FROM shop_protection_state WHERE shop_key=?", (shop_key,))
 
+    def queue_shop_observation_after_cooldown(
+        self, run_id: str, item_id: int, shop_key: str
+    ) -> str:
+        """Keep the protection window, but make the observation part of the running queue."""
+        with self._lock, self.connect() as db:
+            current = db.execute(
+                "SELECT status,retry_after FROM shop_observations "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            ).fetchone()
+            if not current:
+                raise KeyError((run_id, item_id, shop_key))
+            retry_after = str(current["retry_after"] or "")
+            if current["status"] not in {"COOLDOWN", "ACTION_REQUIRED"} or not retry_after:
+                raise ValueError("This check has no active cooldown to wait for")
+            db.execute(
+                "UPDATE shop_observations SET status='PENDING',title=NULL,price_eur=NULL,availability=NULL,"
+                "product_url=NULL,error='Waiting for the protection cooldown before retrying',"
+                "checked_at=NULL,collection_method=NULL,attempts_json='[]',cached=0 "
+                "WHERE run_id=? AND item_id=? AND shop_key=?",
+                (run_id, item_id, shop_key),
+            )
+        return retry_after
+
     def ensure_shop_observation(self, run_id: str, item_id: int, shop_key: str) -> None:
         with self._lock, self.connect() as db:
             db.execute(
@@ -1425,7 +1454,9 @@ class CatalogStore:
             targets = item["source_sheets"] or ["TV"]
             for name in targets:
                 if name in sheets:
-                    sheets[name].append([item["model"]])
+                    # The legacy marketplace engine receives a more specific discovery
+                    # phrase. v4 normalizes it back to the catalog SKU when merging results.
+                    sheets[name].append([search_phrase(item["model"])])
         path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(path)
 

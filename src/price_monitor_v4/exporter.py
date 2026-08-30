@@ -6,6 +6,7 @@ from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.page import PageMargins
 
 from .sources import SHOPS
 
@@ -140,10 +141,22 @@ def write_monitoring_export(
     for sheet in (summary, details):
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
+        sheet.sheet_view.showGridLines = False
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.print_title_rows = "1:1"
+        sheet.print_area = sheet.dimensions
+        sheet.page_margins = PageMargins(
+            left=0.2, right=0.2, top=0.35, bottom=0.35, header=0.15, footer=0.15
+        )
+        sheet.row_dimensions[1].height = 30
         for cell in sheet[1]:
             cell.fill = header_fill
             cell.font = Font(color="FFFFFF", bold=True)
-            cell.alignment = Alignment(vertical="center")
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
         autosize(sheet)
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)

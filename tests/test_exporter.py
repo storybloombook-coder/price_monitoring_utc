@@ -36,7 +36,14 @@ def test_direct_shop_price_participates_in_lowest_in_stock(tmp_path: Path) -> No
 
     write_monitoring_export(output, run, [{"model": "25G64", "canonical_model": "25G64"}])
 
-    workbook = load_workbook(output, data_only=True, read_only=True)
+    workbook = load_workbook(output, data_only=True)
     row = next(workbook["Monitoring summary"].iter_rows(min_row=2, values_only=True))
     assert row[2] == 176.4
     assert row[14] == pytest.approx(26.4)
+    for sheet in workbook.worksheets:
+        assert sheet.page_setup.orientation == "landscape"
+        assert sheet.page_setup.fitToWidth == 1
+        assert sheet.page_setup.fitToHeight == 0
+        assert sheet.sheet_properties.pageSetUpPr.fitToPage is True
+        assert sheet.print_title_rows == "$1:$1"
+        assert sheet.sheet_view.showGridLines is False
