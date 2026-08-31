@@ -7,6 +7,10 @@ const OFFSCREEN_PATH = 'offscreen.html';
 let polling = false;
 const inspecting = new Set();
 let creatingOffscreen = null;
+let jobWork = Promise.resolve();
+function serializeJob(work) {
+  const next = jobWork.then(work, work); jobWork = next.catch(()=>{}); return next;
+}
 
 async function settings() {
   const saved = await chrome.storage.local.get({ appUrl: DEFAULT_APP_URL, closeSuccessfulTabs: true });
@@ -66,7 +70,7 @@ async function liveChannelConnected() {
 }
 
 async function heartbeat() {
-  const response = await bridgeFetch('/browser-bridge/heartbeat', { method: 'POST' });
+  const response = await bridgeFetch('/browser-bridge/heartbeat?auto_salidzini=true', { method: 'POST' });
   if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
   return response.json();
 }
@@ -78,8 +82,13 @@ function extractRenderedPage(model) {
   const clone = document.documentElement.cloneNode(true);
   clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript, input, textarea, select, iframe').forEach(node => node.remove());
   const html = clone.outerHTML;
+  const cards = [...document.querySelectorAll('.item_box_main')];
+  const empty = /\b0\s+preces?\b|nekas netika atrasts/i.test(text);
+  const fingerprint = cards.map(n => n.innerText).join('|');
   return { url: location.href, title: document.title, html: html.slice(0, 7900000),
-    security_challenge: securityChallenge, incomplete: html.length > 7900000 };
+    security_challenge: securityChallenge, incomplete: html.length > 7900000,
+    salidzini_ready: document.readyState === 'complete' && (cards.length > 0 || empty),
+    salidzini_fingerprint: fingerprint || (empty ? 'empty' : '') };
 }
 
 async function snapshot(tabId, model) {
@@ -108,6 +117,9 @@ async function removeActiveJob(jobId) {
 }
 
 async function finishJob(jobId, record, captured, closeTab) {
+  return serializeJob(() => finishJobNow(jobId, record, captured, closeTab));
+}
+async function finishJobNow(jobId, record, captured, closeTab) {
   await chrome.alarms.clear(`${JOB_ALARM_PREFIX}${jobId}`);
   await submit(jobId, captured);
   await removeActiveJob(jobId);
@@ -125,6 +137,7 @@ async function inspectJob(jobId) {
   try {
     const record = (await activeJobs())[jobId];
     if (!record) return;
+    if (record.automatic) { await inspectAutomaticSalidzini(jobId,record); return; }
     const expired = Date.now() - record.startedAt >= JOB_TIMEOUT_MS;
     let captured;
     try {
@@ -162,11 +175,16 @@ async function inspectJob(jobId) {
 }
 
 async function acceptJob(job) {
+  return serializeJob(() => acceptJobNow(job));
+}
+async function acceptJobNow(job) {
+  if ((await activeJobs())[job.id]) { void inspectJob(job.id); return; }
   const domains = {kaina24:'kaina24.lt', salidzini:'salidzini.lv', hinnavaatlus:'hinnavaatlus.ee'};
   const domain = domains[job.shop_key];
   const url = new URL(job.url);
   if (!domain || url.protocol !== 'https:' || ![domain, `www.${domain}`].includes(url.hostname) || url.username || url.password || (url.port && url.port !== '443')) throw new Error('Only marketplace comparison pages are allowed');
   if (job.shop_key === 'salidzini') {
+    if (job.automatic) { await acceptAutomaticSalidzini(job); return; }
     const tabs = await chrome.tabs.query({ url: ['https://salidzini.lv/*', 'https://www.salidzini.lv/*'] });
     const existing = tabs.find(tab => tab.url === job.url);
     if (existing) await chrome.tabs.update(existing.id, { active: true });
@@ -275,11 +293,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void setStatus(message.connected ? 'connected' : 'reconnecting', message.message || 'Updating live channel…');
       if (message.connected) void resumeJobs().catch(() => {});
     } else if (message.type === 'job' && message.job) {
-      void activeJobs().then(jobs => {
-        if (jobs[message.job.id]) return inspectJob(message.job.id);
-        if (Object.keys(jobs).length >= MAX_ACTIVE_JOBS) return;
-        void acceptJob(message.job);
-      });
+      // The backend has one capture slot. A new job may arrive while the
+      // previous result is acknowledged but its local cleanup is still running.
+      // Queue behind that cleanup instead of silently dropping the new job.
+      void acceptJob(message.job).catch(error => setStatus('attention', String(error?.message || error)));
     }
     return false;
   }
@@ -292,5 +309,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 void chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
 importScripts('page-capture.js');
+importScripts('salidzini-auto.js');
 void configureLiveChannel();
 void resumeJobs().catch(error => setStatus('reconnecting', String(error)));

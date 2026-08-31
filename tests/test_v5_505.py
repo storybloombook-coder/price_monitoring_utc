@@ -54,7 +54,11 @@ def test_default_searches_all_marketplaces_and_methods(tmp_path, key, capture, c
 
         monitor = MarketplaceMonitor(store, Bridge(), delay=0, transport=httpx.MockTransport(handler))
         store.begin_run('one', 'deep')
-        monitor.schedule(store.check('one', item['id'], key), capture=capture)
+        legacy_task = store.check('one', item['id'], key)
+        # Exercise the pre-5.0.8 transport contract for restored older tasks.
+        # Current Auto routing is covered independently in test_v5_auto.py.
+        legacy_task.pop('salidzini_mode', None)
+        monitor.schedule(legacy_task, capture=capture)
         await asyncio.gather(*list(monitor.jobs.values()))
         task = store.check('one', item['id'], key)
         if case == 'empty':

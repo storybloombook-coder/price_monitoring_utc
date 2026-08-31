@@ -17,6 +17,15 @@ def infer_model(text):
 
 
 class CatalogStore(BaseCatalog):
+    def salidzini_mode(self):
+        return self.get_meta('v5_salidzini_mode', 'auto')
+
+    def set_salidzini_mode(self, mode):
+        if mode not in {'auto', 'manual'}:
+            raise ValueError('Choose Auto or Manual')
+        with self._lock, self.connect() as db:
+            self._set_meta(db, 'v5_salidzini_mode', mode)
+
     def list_items(self, kind, scope="active", query=""):
         if kind not in {"source","stock"} or scope not in {"active","all","trash"}:
             raise ValueError("Invalid catalog scope")
@@ -173,8 +182,10 @@ class CatalogStore(BaseCatalog):
                         "offers": [], "search_url": search_url(key, item["model"]), "product_url": item.get("marketplace_links", {}).get(key),
                         "stock_quantity": quantity, "stock_unit_cost_eur": cost, "cached": False,
                         "previous_manual_resolution": self.previous_decision(item["id"], key, run_id)}
+                if key == 'salidzini':
+                    task['salidzini_mode'] = self.salidzini_mode()
                 ttl = {"quick": 12, "balanced": 4, "deep": 0}[mode]
-                cached = self.cached_check(item["canonical_model"], key, ttl)
+                cached = self.cached_check(item["canonical_model"], key, ttl) if task.get('salidzini_mode') != 'manual' else None
                 if cached:
                     task.update({k: cached.get(k) for k in ("offers", "status", "finished_at", "coverage", "collection_method", "product_url", "error", "collection_revision")})
                     task["cached"] = True

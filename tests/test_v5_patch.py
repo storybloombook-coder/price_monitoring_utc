@@ -117,7 +117,8 @@ def test_network_failure_is_not_reported_as_captcha_or_not_found(tmp_path):
         await asyncio.gather(*list(monitor.jobs.values()))
         checks = store.checks("network")
         assert len(checks) == 3
-        assert all(t["status"] == "ACTION_REQUIRED" and t["error_code"] == "NETWORK_UNAVAILABLE" for t in checks)
+        assert all(t["status"] == "ACTION_REQUIRED" and t["error_code"] == "NETWORK_UNAVAILABLE" for t in checks if t['marketplace_key'] != 'salidzini')
+        assert 'extension' in next(t['error'] for t in checks if t['marketplace_key'] == 'salidzini')
         assert not monitor.cooldowns
     asyncio.run(scenario())
 

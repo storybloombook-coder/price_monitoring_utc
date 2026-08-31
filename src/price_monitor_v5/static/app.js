@@ -36,7 +36,7 @@ const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not 
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
   hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
-  salidzini: 'Complete hCaptcha yourself, then click Send to PriceMonitor in the v5.0.6 extension on the same Salidzini tab. No reload or manual-verification time limit. Review and save prices in the extension; send each results page separately. Offline captures are queued locally. Partial results require review and are not Not found. No retailer pages are opened.'
+  salidzini: 'Auto uses the connected v5.0.8+ extension and one working tab, reads all result pages with pauses and finishes only after exact listings match the reported count. Geedo recommendations are excluded. CAPTCHA pauses the browser queue for manual verification. Manual mode sends no automatic requests: use Send to PriceMonitor, review and mark all pages reviewed to finish. No retailer pages are opened.'
 };
 function parsingInfo(key, label = key) {
   const help = PARSING_HELP[key] ? PARSING_HELP[key] + SEARCH_FALLBACK_HELP : null;
@@ -186,6 +186,7 @@ function sourceSwitch(item) {
   const identity = item.kind === 'marketplace' ? `<span class="source-title"><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>${parsingInfo(item.key, item.name)}</span>` : `<span>${escapeHtml(item.name)}</span>`;
   return `<div class="source-item ${item.master_enabled ? '' : 'master-disabled'}"><div class="source-identity">${identity}<span class="learned-method">${item.kind === 'shop' ? 'Seller filter · no direct requests' : 'Comparison pages only'}</span></div>
     <div class="source-controls">
+    ${item.key === 'salidzini' ? `<label class="salidzini-mode">Collection <select id="salidzini-mode" aria-label="Salidzini collection mode"><option value="auto" ${state.salidziniMode !== 'manual' ? 'selected' : ''}>Auto</option><option value="manual" ${state.salidziniMode === 'manual' ? 'selected' : ''}>Manual</option></select></label>` : ''}
     <label class="switch-row" aria-label="Enable ${escapeHtml(item.name)}"><input type="checkbox" data-source-key="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''} ${item.master_enabled ? '' : 'disabled'}><span class="switch"></span></label></div></div>`;
 }
 
@@ -207,10 +208,22 @@ function renderSources() {
   document.querySelectorAll('[data-source-key]').forEach(input => input.addEventListener('change', () => updateSource(input.dataset.sourceKey, input.checked)));
   document.querySelectorAll('[data-source-method]').forEach(select => select.addEventListener('change', () => updateSourceMethod(select.dataset.sourceMethod, select.value)));
   document.querySelectorAll('[data-test-source]').forEach(button => button.addEventListener('click', () => openMethodTest(button.dataset.testSource)));
+  byId('salidzini-mode')?.addEventListener('change', async event => {
+    const select = event.target; select.disabled = true;
+    try {
+      const result = await api('/salidzini/settings', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({mode:select.value})});
+      state.salidziniMode = result.mode;
+      state.actionRenderSignature = '';
+      if (state.currentRunId) await pollRun(state.currentRunId);
+      showBanner('success', `Salidzini ${result.mode === 'auto' ? 'Auto: connected v5.0.8+ extension required' : 'Manual: no automatic requests'}. Applies to new checks; existing results stay unchanged.`);
+    } catch (error) { select.value = state.salidziniMode; showBanner('error', error.message); }
+    finally { select.disabled = false; }
+  });
 }
 
 async function loadSources() {
-  state.sources = await api('/sources'); renderSources();
+  const [sources, settings] = await Promise.all([api('/sources'), api('/salidzini/settings')]);
+  state.sources = sources; state.salidziniMode = settings.mode; renderSources();
   state.resultRenderSignature = '';
   if (state.currentRunId) await pollRun(state.currentRunId);
   else renderResults();
@@ -229,8 +242,9 @@ async function loadBrowserBridge() {
     root.classList.toggle('connected', bridge.connected);
     const current = bridge.jobs?.[0];
     const detail = current ? ` · checking ${current.shop_key} for ${current.model}` : '';
+    const autoNotice = state.salidziniMode !== 'manual' && bridge.connected && !bridge.automatic_salidzini ? ' · Reload the v5.0.8+ extension for Salidzini Auto' : '';
     const transport = bridge.transport === 'websocket' ? ' · live channel' : bridge.transport === 'polling' ? ' · recovery polling' : '';
-    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${transport}${detail}` : 'Edge extension not connected · protected marketplaces require manual review (extension optional)'}</span>`;
+    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${transport}${detail}${autoNotice}` : 'Extension not connected · Salidzini Auto needs the extension; manual entry remains available'}</span>`;
   } catch {
     root.classList.remove('connected');
     root.innerHTML = '<span class="bridge-dot"></span><span>Edge extension status unavailable</span>';
@@ -612,7 +626,7 @@ function renderActionRequired(run) {
     const cooldown = false;
     const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : '';
     const retryAction = item.action_key === 'salidzini'
-      ? '<span class="muted">After CAPTCHA, open the PriceMonitor extension → Send to PriceMonitor → review and save. No time limit; keep this tab open.</span>'
+      ? `${state.salidziniMode !== 'manual' ? `<button type="button" data-check-action="retry" ${attrs}>Retry automatic check</button>` : ''}<span class="muted">Auto needs the updated extension. For manual capture: Send to PriceMonitor → review → select “All pages and offers reviewed” to finish. Each marketplace is a separate check.</span>`
       : cooldown
       ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
       : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;

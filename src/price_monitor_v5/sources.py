@@ -1,5 +1,5 @@
 from dataclasses import replace
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qs
 import re
 from price_monitor_v4.sources import SOURCES as V4_SOURCES, MonitoringSource, search_phrase
 
@@ -35,3 +35,9 @@ def search_url(key, model):
     if key == "kaina24":
         url = url.replace("+", "-").lower()
     return marketplace_url(key, url)
+
+
+def same_salidzini_search(first, second):
+    """Allow normal www/encoding canonicalization, never a different SKU/filter/page."""
+    a, b = (urlsplit(marketplace_url('salidzini', value)) for value in (first, second))
+    return a.path.rstrip('/') == b.path.rstrip('/') == '/cena' and parse_qs(a.query) == parse_qs(b.query)

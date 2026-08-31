@@ -27,6 +27,7 @@ class CaptureJob:
     url: str
     created_at: float
     future: asyncio.Future[dict[str, Any]]
+    automatic: bool = False
 
     def public(self) -> dict[str, Any]:
         return {
@@ -34,6 +35,7 @@ class CaptureJob:
             "shop_key": self.shop_key,
             "model": self.model,
             "url": self.url,
+            "automatic": self.automatic,
         }
 
 
@@ -48,6 +50,7 @@ class BrowserBridge:
         self._jobs: dict[str, CaptureJob] = {}
         self._websocket_connections = 0
         self._capture_lock = asyncio.Lock()
+        self.automatic_salidzini = False
 
     @property
     def connected(self) -> bool:
@@ -55,8 +58,10 @@ class BrowserBridge:
             self._last_seen > 0 and time.monotonic() - self._last_seen <= self.connected_window_seconds
         )
 
-    def heartbeat(self) -> None:
+    def heartbeat(self, automatic_salidzini=None) -> None:
         self._last_seen = time.monotonic()
+        if automatic_salidzini is not None:
+            self.automatic_salidzini = automatic_salidzini is True
 
     def websocket_connected(self) -> None:
         self._websocket_connections += 1
@@ -74,9 +79,10 @@ class BrowserBridge:
             "transport": "websocket" if self._websocket_connections else ("polling" if self.connected else "offline"),
             "jobs": [job.public() for job in self._jobs.values()],
             "extension_id": EXTENSION_ID,
+            "automatic_salidzini": self.automatic_salidzini,
         }
 
-    async def capture(self, shop_key: str, model: str, url: str) -> dict[str, Any]:
+    async def capture(self, shop_key: str, model: str, url: str, *, automatic=False) -> dict[str, Any]:
         async with self._capture_lock:
             if not self.connected:
                 raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
@@ -88,6 +94,7 @@ class BrowserBridge:
                 url=url,
                 created_at=time.monotonic(),
                 future=loop.create_future(),
+                automatic=automatic,
             )
             self._jobs[job.id] = job
             self._queue.put_nowait(job.id)

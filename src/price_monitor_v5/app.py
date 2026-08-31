@@ -83,9 +83,9 @@ def create_app(settings=None, store=None, transport=None):
             raise HTTPException(403,"Bundled extension only")
 
     @app.post("/browser-bridge/heartbeat")
-    async def heartbeat(request: Request):
+    async def heartbeat(request: Request, auto_salidzini: bool=False):
         extension(request)
-        bridge.heartbeat()
+        bridge.heartbeat(auto_salidzini)
         return bridge.status()
 
     @app.get("/browser-bridge/jobs/next")
@@ -112,6 +112,7 @@ def create_app(settings=None, store=None, transport=None):
             await ws.close(code=1008)
             return
         await ws.accept()
+        bridge.heartbeat(ws.query_params.get('auto_salidzini') == '1')
         bridge.websocket_connected()
         receiver = asyncio.create_task(ws.receive_json())
         sender = asyncio.create_task(bridge.next_job(25))
@@ -144,6 +145,18 @@ def create_app(settings=None, store=None, transport=None):
     @app.get("/sources")
     async def sources():
         return catalog.list_sources()
+
+    @app.get('/salidzini/settings')
+    async def salidzini_settings():
+        return {'mode': catalog.salidzini_mode()}
+
+    @app.post('/salidzini/settings')
+    async def update_salidzini_settings(payload: dict=Body(...)):
+        async with start_lock:
+            if any(ident[2] == 'salidzini' for ident in monitor.jobs):
+                raise HTTPException(409, 'Stop the active Salidzini checks before changing mode')
+            catalog.set_salidzini_mode(payload.get('mode'))
+        return {'mode': catalog.salidzini_mode()}
 
     @app.patch("/sources/master/{kind}")
     async def master(kind: str,payload: dict=Body(...)):

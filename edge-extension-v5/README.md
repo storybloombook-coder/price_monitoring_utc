@@ -1,4 +1,18 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.7
+# PriceMonitor v5 Marketplace Bridge · 5.0.8
+
+## Salidzini Auto
+
+Reload this extension after updating. Select **Auto** next to Salidzini in the
+app, then Start monitoring. One owned tab is reused for pages and models; no
+popup confirmation is required for fully verified automatic results. The app
+checks exact models, listing counts and pagination. CAPTCHA pauses the queue
+for manual action; it is never solved automatically. Hard stop cancels pending
+jobs and late replies cannot write prices. No retailer pages are collected.
+
+**Manual** mode sends no automatic requests. Use the panel below; partial saves
+retain Action required. Mark all pages reviewed and choose **Save prices and
+finish check** only after the whole search is reviewed. Manual snapshots from
+5.0.6/5.0.7 remain compatible and survive extension reload.
 
 The 5.0.7 app fixes current Salidzini cards. Existing 5.0.6 extension snapshots
 remain compatible: click **Refresh preview**, then review and save. No recapture

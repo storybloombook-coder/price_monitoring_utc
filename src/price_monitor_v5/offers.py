@@ -258,6 +258,11 @@ def parse_page(key, model, content, page_url):
     is_product = (key == "hinnavaatlus" and bool(re.match(r"/\d+/", urlsplit(page_url).path))) or (key == "kaina24" and "/p/" in page_url)
     product_match = is_product and bool(matched_model(key, model, title))
     offers, links, rejected = [], [], 0
+    salidzini_ids = set()
+    salidzini_seen_ids = set()
+    heading = next((n for n in nodes if n.tag == 'h1'), None)
+    count_match = re.search(r'\b(\d+)\s+preces?\b', heading.parent.text(), re.I) if key == 'salidzini' and heading else None
+    salidzini_expected = int(count_match[1]) if count_match else None
     if key == "hinnavaatlus":
         rows = [n for n in nodes if n.tag == "tr" and n.has("offer")]
         for row in rows if product_match else []:
@@ -279,6 +284,8 @@ def parse_page(key, model, content, page_url):
                 if kind != 'offer':
                     rejected += int(kind == 'unknown')
                     continue
+                if row.has('item_box_main') or row.has('item_box_sub'):
+                    salidzini_seen_ids.add(parse_qs(urlsplit(row.first('item_link').attrs['href']).query)['itemid'][0])
             name = row.first("product-title", "item_name", "product-name", "title")
             evidence = title if product_match else name.text() if name else ""
             known_search_rows |= bool(evidence)
@@ -290,8 +297,11 @@ def parse_page(key, model, content, page_url):
                     if key == 'salidzini' and not re.fullmatch(r'\s*(?:€|EUR)?\s*\d+(?:[ .]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR)?\s*', cash, re.I):
                         rejected += 1
                         continue
-                    offers.append({"store": seller.text(), "price_eur": price(cash), "title": evidence,
-                                   "availability": salidzini_availability(row) if key == 'salidzini' else availability(row.text())})
+                    raw = {"store": seller.text(), "price_eur": price(cash), "title": evidence,
+                           "availability": salidzini_availability(row) if key == 'salidzini' else availability(row.text())}
+                    if key == 'salidzini' and (link := row.first('item_link')):
+                        raw['listing_id'] = parse_qs(urlsplit(link.attrs.get('href', '')).query).get('itemid', [None])[0]
+                    offers.append(raw)
                 else:
                     rejected += 1
     # Explicit capture rows produced by the bundled v5 extension.
@@ -321,21 +331,24 @@ def parse_page(key, model, content, page_url):
             current_page = int(parse_qs(urlsplit(page_url).query).get("page",["1"])[0])
         except ValueError:
             page_number = current_page = 0
-        if same_path and (next_page or page_number > current_page) and url not in links:
+        if key != 'salidzini' and same_path and (next_page or page_number > current_page) and url not in links:
             links.append(url)
         if key == "salidzini" and same_path:
-            following, current = parse_qs(urlsplit(url).query), parse_qs(urlsplit(page_url).query)
-            try:
-                next_offset, current_offset = int(following.pop("offset", ["0"])[0]), int(current.pop("offset", ["0"])[0])
-            except ValueError:
-                continue
-            # Keep the SKU and all filters unchanged; never follow related searches.
-            if following == current and next_offset > current_offset and url not in links:
-                links.append(url)
+            for parameter, default in [('offset', '0'), ('page', '1')]:
+                following, current = parse_qs(urlsplit(url).query), parse_qs(urlsplit(page_url).query)
+                try:
+                    next_index, current_index = int(following.pop(parameter, [default])[0]), int(current.pop(parameter, [default])[0])
+                except ValueError:
+                    continue
+                # Keep SKU and every filter unchanged, including on rel=next.
+                if following == current and next_index > current_index and url not in links:
+                    links.append(url)
     normalized, seen = [], set()
     for raw in offers:
         try:
             offer = normalize_offer(key, model, raw, page_url)
+            if key == 'salidzini' and re.fullmatch(r'\d+', str(raw.get('listing_id') or '')):
+                salidzini_ids.add(raw['listing_id'])
             signature = (compact(offer["store"]), offer["price_eur"], offer["availability"], offer["url"])
             if signature not in seen:
                 seen.add(signature)
@@ -344,6 +357,7 @@ def parse_page(key, model, content, page_url):
             rejected += 1
     text = " ".join(doc.text().lower().split())
     empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|pagal įvestą paieškos frazę nieko neradome|0 rezultāti|nekas netika atrasts", text))
+    empty |= key == 'salidzini' and salidzini_expected == 0
     # Recognized result cards for other models allow a shorter query. Broken
     # rows, unknown markup or incomplete pages must still go to manual review.
     if not is_product and known_search_rows and not normalized and not links and not rejected:
@@ -354,4 +368,6 @@ def parse_page(key, model, content, page_url):
     # Unfamiliar markup or zero extracted offers is NOT proof of absence.
     return {"offers": normalized, "links": links, "not_found": empty and not normalized,
             "rejected": rejected, "title": title,
-            "partial": bool(rejected) or bool(normalized and key != "hinnavaatlus")}
+            "salidzini_expected_count": salidzini_expected, "salidzini_offer_ids": sorted(salidzini_ids),
+            "salidzini_seen_ids": sorted(salidzini_seen_ids),
+            "partial": bool(rejected) or bool(normalized and key != "hinnavaatlus" and not (key == 'salidzini' and salidzini_expected is not None))}

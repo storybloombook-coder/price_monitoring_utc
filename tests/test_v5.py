@@ -177,7 +177,7 @@ def test_705_checks_only_three_protected_requests(store):
         assert len(store.checks("load"))==705
         monitor.launch("load")
         await asyncio.gather(*list(monitor.jobs.values()))
-        assert len(requests)==3
+        assert len(requests)==2  # Salidzini Auto never uses the direct HTTP client.
         run=store.run("load")
         assert run["status"]=="COMPLETE"
         assert all(t["status"]=="ACTION_REQUIRED" for t in run["tasks"])
@@ -196,7 +196,7 @@ def test_hard_stop_no_late_overwrite(store):
         store.begin_run("stop","deep"); monitor.launch("stop")
         await began.wait()
         await asyncio.wait_for(monitor.stop_run("stop"),timeout=1)
-        assert all(t["status"]=="INCOMPLETE" for t in store.checks("stop"))
+        assert all(t["status"] == ("ACTION_REQUIRED" if t['marketplace_key']=='salidzini' else "INCOMPLETE") for t in store.checks("stop"))
         assert not monitor.jobs
     asyncio.run(scenario())
 
