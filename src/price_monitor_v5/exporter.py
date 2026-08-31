@@ -28,7 +28,15 @@ def write_monitoring_export(path, run):
         model = tasks[0]["source_model"]
         summaries = []
         for field in ("cheapest_in_stock","highest_in_stock"):
-            summaries.append("\n".join(f"{t['marketplace']}: {t[field]['price_eur']:.2f} EUR ({t[field]['store']})" + (" [partial]" if t.get("coverage") != "complete" else "") if t.get(field) else f"{t['marketplace']}: {t['status']} / no in-stock price" for t in tasks))
+            lines = []
+            for task in tasks:
+                offer = task.get(field) or task.get("lowest_reported" if field == "cheapest_in_stock" else "highest_reported")
+                if offer:
+                    note = "" if task.get(field) else " [reported price; " + offer["availability"].replace("_", " ").lower() + "]"
+                    lines.append(f"{task['marketplace']}: {offer['price_eur']:.2f} EUR ({offer['store']})" + note + (" [partial]" if task.get("coverage") != "complete" else ""))
+                else:
+                    lines.append(f"{task['marketplace']}: {task['status']} / no in-stock price")
+            summaries.append("\n".join(lines))
         all_offers = [o for t in tasks for o in t.get("offers",[])]
         low = [min((o["price_eur"] for o in all_offers if o["availability"]==state),default=None) for state in ("IN_STOCK","PRE_ORDER")]
         shops = [next((s for s in run["shop_results"] if s["item_id"]==item_id and s["shop_key"]==shop.key),{}) for shop in SHOPS]

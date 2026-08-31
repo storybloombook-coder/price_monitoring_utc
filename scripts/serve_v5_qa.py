@@ -7,7 +7,7 @@ from price_monitor_v5.app import create_app
 from price_monitor_v5.config import Settings
 from price_monitor_v5.catalog import CatalogStore
 
-settings = Settings.load(Path("build/v5-ui-qa"))
+settings = Settings.load(Path("build/v5-ui-qa-501"))
 store = CatalogStore(settings.catalog_database)
 if not store.list_items("source"):
     for model in ["25G64", "75C6K"]:
@@ -22,8 +22,8 @@ async def handler(request):
     if "/6366101/" not in request.url.path:
         return httpx.Response(200,text='<a href="/6366101/tcl-25-lcd-25g64/">TCL 25G64</a>')
     return httpx.Response(200,text='''<h1>TCL 25G64</h1><table>
-        <tr class="offer"><td class="name">Elisa Eesti</td><td class="in-stock">Laos</td><td class="offer-price">199 €</td></tr>
-        <tr class="offer"><td class="name">QA other seller</td><td class="in-stock">Laos</td><td class="offer-price">249 €</td></tr></table>''')
+        <tr class="offer"><td class="name">Elisa Eesti</td><td class="stock"><div class="in-stock">0-1tp</div></td><td class="offer-price">199 €</td></tr>
+        <tr class="offer"><td class="name">QA other seller</td><td class="stock"><div class="in-stock">4-7tp</div></td><td class="offer-price">249 €</td></tr></table>''')
 
 app=create_app(settings,store,httpx.MockTransport(handler))
 app.state.monitor.delay=.3

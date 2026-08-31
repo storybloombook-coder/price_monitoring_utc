@@ -2,9 +2,9 @@ const byId = id => document.getElementById(id);
 const HIDDEN_COLUMNS_KEY = 'price-monitor-v5.hidden-columns';
 const RUN_MODE_KEY = 'price-monitor-v5.run-mode';
 const RUN_MODE_HELP = {
-  quick: 'Quick · reuse complete automatic marketplace results for up to 12 hours. No retailer requests.',
-  balanced: 'Balanced · 4-hour marketplace cache, saved comparison pages first. Manual decisions always need fresh review.',
-  deep: 'Deep · fresh marketplace checks without price cache. Protection cooldowns still apply.'
+  quick: 'Quick · reuse complete automatic marketplace results for up to 12 hours. Mode changes cache age only, not collection methods.',
+  balanced: 'Balanced · reuse complete automatic marketplace results for up to 4 hours. Manual decisions are not reused as fresh prices. Mode changes cache age only.',
+  deep: 'Deep · ignore the price cache and check again. The same collection methods and protection cooldowns still apply.'
 };
 const SHOP_METHODS = [
   ['auto', 'Auto · gentle fallback'], ['direct', 'Direct request'], ['background', 'Background Edge'],
@@ -471,9 +471,11 @@ function marketplaceCell(row, openDetails, maximum = false) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces:${maximum ? 'max' : 'min'}`;
   const summaries = row.tasks.map(task => {
-    const offer = task[maximum ? 'highest_in_stock' : 'cheapest_in_stock'];
-    const note = task.coverage !== 'complete' ? ' · partial' : '';
-    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : task.offers?.length ? '<span>No in-stock offers</span>' : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${note || (!offer && task.offers?.length ? ' · no confirmed in-stock price' : '')}</small></span>`;
+    const inStock = task[maximum ? 'highest_in_stock' : 'cheapest_in_stock'];
+    const offer = inStock || task[maximum ? 'highest_reported' : 'lowest_reported'];
+    const availabilityNote = offer && !inStock ? ` · reported price · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
+    const note = availabilityNote + (task.coverage !== 'complete' ? ' · partial' : '');
+    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${escapeHtml(note)}</small></span>`;
   }).join('');
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);
@@ -757,6 +759,9 @@ async function saveResultCorrection(status) {
 }
 
 function renderRun(run) {
+  const networkFailures = (run.tasks || []).filter(task => task.status === 'ACTION_REQUIRED' && (task.error_code === 'NETWORK_UNAVAILABLE' || task.error === 'All connection attempts failed'));
+  byId('run-network-warning').hidden = !networkFailures.length;
+  byId('run-network-warning').textContent = `${networkFailures.length} checks could not connect to the Internet. No page was read for these checks. Check network/firewall/proxy access, restart PriceMonitor from its folder, then retry. This is not a Not found result or a CAPTCHA.`;
   const previousStatus = state.lastRunStatus;
   state.currentRunId = run.id || run.run_id;
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
@@ -911,7 +916,39 @@ async function loadLogs() {
   catch { byId('logs').textContent = 'Activity log is unavailable.'; }
 }
 
+function openCatalogClear(kind) {
+  const dialog = byId('catalog-clear-dialog');
+  byId('catalog-clear-form').dataset.kind = kind;
+  byId('catalog-clear-title').textContent = kind === 'source' ? 'Clear monitoring models?' : 'Clear warehouse stock?';
+  byId('catalog-clear-description').textContent = kind === 'source'
+    ? 'These models will be excluded from future monitoring. Warehouse stock stays unchanged.'
+    : 'Warehouse rows will be removed from the active stock table. All monitoring models remain enabled, even when their stock is removed.';
+  byId('catalog-clear-error').hidden = true;
+  dialog.showModal();
+}
+
+async function clearCatalog(event) {
+  event.preventDefault();
+  const form = event.currentTarget; const kind = form.dataset.kind;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await api(`/catalog/clear/${kind}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
+    byId('catalog-clear-dialog').close();
+    state.catalogStates[kind] = new Set(['active','paused']);
+    initializeCatalogFilters();
+    await Promise.all([loadCatalog(), loadSetupStatus()]);
+    showBanner('success', `${result.moved_to_trash} rows moved to Trash. Run history was kept.`);
+  } catch (error) {
+    byId('catalog-clear-error').textContent = error.message;
+    byId('catalog-clear-error').hidden = false;
+  } finally { button.disabled = false; }
+}
+
 function wireEvents() {
+  document.querySelectorAll('[data-clear-catalog]').forEach(button => button.addEventListener('click', () => openCatalogClear(button.dataset.clearCatalog)));
+  document.querySelectorAll('[data-cancel-catalog-clear]').forEach(button => button.addEventListener('click', () => byId('catalog-clear-dialog').close()));
+  byId('catalog-clear-form').addEventListener('submit', clearCatalog);
   byId('result-rows').addEventListener('click', async event => {
     const button = event.target.closest('[data-remove-offer]');
     if (!button) return;

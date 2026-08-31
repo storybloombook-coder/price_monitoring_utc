@@ -163,6 +163,15 @@ def create_app(settings=None, store=None, transport=None):
     async def create(kind: str,payload: dict=Body(...)):
         return catalog.create_item(kind,payload)
 
+    @app.post("/catalog/clear/{kind}")
+    async def clear_catalog(kind: str,payload: dict=Body(...)):
+        if payload.get("confirm") is not True:
+            raise ValueError("Confirm moving all rows in this table to Trash")
+        async with start_lock:
+            if monitor.jobs:
+                raise HTTPException(409,"Stop the current checks before clearing a catalog table")
+            return catalog.clear_catalog(kind)
+
     @app.patch("/catalog/items/{item_id}")
     async def update(item_id: int,payload: dict=Body(...)):
         return catalog.update_item(item_id,payload)

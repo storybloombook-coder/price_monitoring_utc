@@ -1,6 +1,6 @@
 [project]
 name = "price-monitor-v5"
-version = "5.0.0"
+version = "5.0.1"
 description = "Local-first Windows marketplace price monitoring application"
 requires-python = ">=3.12"
 dependencies = [

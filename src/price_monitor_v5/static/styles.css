@@ -37,6 +37,9 @@ a { color: var(--blue); }
 .service-state.ok { color: var(--brand); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; box-shadow: var(--shadow); margin-bottom: 18px; padding: 20px; }
 .section-heading, .panel-heading, .dialog-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.catalog-heading-actions { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.catalog-heading-actions button { white-space: nowrap; }
+.network-warning { padding: 12px; border: 1px solid #e5b25f; border-radius: 8px; background: #fff6de; color: #704807; }
 .section-heading { margin-bottom: 18px; }
 .section-heading > .muted { max-width: 580px; text-align: right; }
 .setup-grid, .catalog-grid, .footer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }

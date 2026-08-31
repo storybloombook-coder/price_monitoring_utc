@@ -110,6 +110,14 @@ class CatalogStore(BaseCatalog):
                 inserted += 1
         return inserted
 
+    def clear_catalog(self, kind):
+        if kind not in {"source", "stock"}:
+            raise ValueError("Choose source or stock")
+        now = utc_now()
+        with self._lock, self.connect() as db:
+            changed = db.execute("UPDATE catalog_items SET deleted_at=?,updated_at=? WHERE kind=? AND deleted_at IS NULL", (now, now, kind)).rowcount
+        return {"kind": kind, "moved_to_trash": changed}
+
     def import_stock_workbook(self, path, filename):
         parsed = []
         models = [i["model"] for i in self.list_items("source", "all")]
@@ -211,6 +219,9 @@ class CatalogStore(BaseCatalog):
             task["cheapest_in_stock"] = lowest("IN_STOCK")
             task["cheapest_pre_order"] = lowest("PRE_ORDER")
             task["highest_in_stock"] = max((o for o in offers if o["availability"] == "IN_STOCK"),key=lambda o:o["price_eur"],default=None)
+            # Report unconfirmed prices separately; never relabel them as in stock.
+            task["lowest_reported"] = min(offers,key=lambda o:o["price_eur"],default=None)
+            task["highest_reported"] = max(offers,key=lambda o:o["price_eur"],default=None)
         shops = []
         for item_id in dict.fromkeys(t["item_id"] for t in tasks):
             model_tasks = [t for t in tasks if t["item_id"] == item_id]

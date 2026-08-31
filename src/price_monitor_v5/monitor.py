@@ -76,7 +76,7 @@ class MarketplaceMonitor:
             async with self.locks[key]:
                 if self.blocked(key) and not capture:
                     raise ReviewRequired("Automatic requests are cooling down. Manual offer entry and browser capture are available now.")
-                task.update(status="RUNNING",error=None,offers=[],cached=False)
+                task.update(status="RUNNING",error=None,error_code=None,offers=[],cached=False)
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
                 async with asyncio.timeout(90 if capture else 65):
@@ -85,6 +85,9 @@ class MarketplaceMonitor:
                         await self.collect(task, client, capture)
         except asyncio.CancelledError:
             return
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError):
+            task.update(status="ACTION_REQUIRED", coverage="partial", error_code="NETWORK_UNAVAILABLE",
+                        error="Network connection failed before the marketplace could be read. Check Internet/firewall/proxy access and restart PriceMonitor from its folder. This is not a CAPTCHA or a missing product.")
         except Exception as error:
             task.update(status="ACTION_REQUIRED", coverage="partial", error=str(error) or "Check timed out; use manual review")
             if self.blocked(key):
