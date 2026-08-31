@@ -1,6 +1,7 @@
 """Active-page preview/apply contracts; all tests are offline and isolated."""
 import json
 import uuid
+from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -72,6 +73,16 @@ def test_preview_is_read_only_filters_model_and_apply_is_idempotent(setup):
     assert client.get('/browser-bridge/status').json()['capture_revision'] == 1
     with store.connect() as db:
         assert db.execute('SELECT count(*) FROM v5_manual_history').fetchone()[0] == 1
+
+
+def test_existing_snapshot_can_be_refreshed_using_current_salidzini_markup(setup):
+    client, store, item = setup
+    html = (Path(__file__).parent / 'fixtures/salidzini-25g64-cards.html').read_text(encoding='utf-8')
+    body = payload(html=html)
+    result = preview(client, body)
+    assert [o['price_eur'] for o in result['offers']] == [199, 208.8]
+    assert apply(client, body, result, complete=True).status_code == 200
+    assert len(store.check('qa-one', item['id'], 'salidzini')['offers']) == 2
 
 
 @pytest.mark.parametrize('change', ['price', 'clear', 'new-run', 'disable'])

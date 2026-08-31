@@ -1,4 +1,9 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.6
+# PriceMonitor v5 Marketplace Bridge · 5.0.7
+
+The 5.0.7 app fixes current Salidzini cards. Existing 5.0.6 extension snapshots
+remain compatible: click **Refresh preview**, then review and save. No recapture
+or CAPTCHA is needed if the queued snapshot contains the loaded results.
+Geedo recommendations are excluded from Salidzini prices.
 
 After updating the portable app, reload this unpacked extension in Edge/Chrome.
 

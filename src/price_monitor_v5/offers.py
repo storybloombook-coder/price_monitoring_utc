@@ -72,6 +72,43 @@ def shortened_queries(model):
             and re.search(r"[A-Za-z]", value) and re.search(r"\d", value)]
 
 
+LEGACY_OFFER_CLASSES = {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
+
+
+def salidzini_cards(root):
+    nodes = list(root.nodes())
+    # Current DOM has two nested containers: parse each card exactly once.
+    return ([n for n in nodes if n.has('item_box_main')] or
+            [n for n in nodes if n.has('item_box_sub')] or
+            [n for n in nodes if any(n.has(c) for c in LEGACY_OFFER_CLASSES)])
+
+
+def salidzini_card_kind(row, page_url):
+    if not (row.has('item_box_main') or row.has('item_box_sub')):
+        return 'offer'  # Legacy snapshots remain readable.
+    link = row.first('item_link')
+    target = urlsplit(urljoin(page_url, link.attrs.get('href', '') if link else ''))
+    if target.hostname in {'geedo.lv', 'www.geedo.lv'}:
+        return 'recommendation'
+    # Inspect the redirect address as evidence only; never fetch/follow it.
+    if (link and link.tag == 'a' and target.scheme == 'https' and
+            target.hostname in {'salidzini.lv', 'www.salidzini.lv'} and
+            target.port in (None, 443) and not target.username and not target.password and
+            target.path == '/click.php' and
+            re.fullmatch(r'\d+', parse_qs(target.query).get('itemid', [''])[0])):
+        return 'offer'
+    return 'unknown'
+
+
+def salidzini_availability(row):
+    # Tooltip text is the actual stock evidence; delivery days/cost are not stock.
+    titles = ' '.join(n.attrs.get('title', '') for n in row.nodes())
+    count = re.search(r'noliktavā\s*:\s*(\d+)(?:\+)?\b', titles, re.I)
+    if count:
+        return 'IN_STOCK' if int(count[1]) > 0 else 'OUT_OF_STOCK'
+    return availability(row.text() + ' ' + titles)
+
+
 def candidate_links(query, content, page_url, key="hinnavaatlus"):
     """Suggestions only: truncated model prefixes never authorize a price."""
     matches, seen = [], set()
@@ -79,9 +116,11 @@ def candidate_links(query, content, page_url, key="hinnavaatlus"):
     if key == "hinnavaatlus":
         entries = [(n, n) for n in root.nodes() if n.tag == "a" and n.has("product-name")]
     else:
-        classes = {"product-item-h-wrap"} if key == "kaina24" else {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
+        classes = {"product-item-h-wrap"} if key == "kaina24" else LEGACY_OFFER_CLASSES
+        rows = ([n for n in salidzini_cards(root) if salidzini_card_kind(n, page_url) == 'offer']
+                if key == 'salidzini' else [n for n in root.nodes() if any(n.has(cls) for cls in classes)])
         entries = [(n.first("name" if key == "kaina24" else "product-title", "item_name", "product-name", "title"), n)
-                   for n in root.nodes() if any(n.has(cls) for cls in classes)]
+                   for n in rows]
     for node, scope in entries:
         if not node:
             continue
@@ -232,8 +271,14 @@ def parse_page(key, model, content, page_url):
     # Kaina24/Salidzini expose seller rows in server HTML or in a rendered capture.
     known_search_rows = False
     if key in {"kaina24", "salidzini"}:
-        row_classes = {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
-        for row in [n for n in nodes if any(n.has(cls) for cls in row_classes)]:
+        rows = (salidzini_cards(doc) if key == 'salidzini' else
+                [n for n in nodes if any(n.has(cls) for cls in LEGACY_OFFER_CLASSES)])
+        for row in rows:
+            if key == 'salidzini':
+                kind = salidzini_card_kind(row, page_url)
+                if kind != 'offer':
+                    rejected += int(kind == 'unknown')
+                    continue
             name = row.first("product-title", "item_name", "product-name", "title")
             evidence = title if product_match else name.text() if name else ""
             known_search_rows |= bool(evidence)
@@ -246,7 +291,7 @@ def parse_page(key, model, content, page_url):
                         rejected += 1
                         continue
                     offers.append({"store": seller.text(), "price_eur": price(cash), "title": evidence,
-                                   "availability": availability(row.text())})
+                                   "availability": salidzini_availability(row) if key == 'salidzini' else availability(row.text())})
                 else:
                     rejected += 1
     # Explicit capture rows produced by the bundled v5 extension.
