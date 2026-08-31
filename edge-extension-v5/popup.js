@@ -23,8 +23,8 @@ async function refresh() {
     closeSuccessfulTabs: true,
     bridgeStatus: null
   });
-  urlInput.value = saved.appUrl;
-  closeTabsInput.checked = saved.closeSuccessfulTabs;
+  if (document.activeElement !== urlInput) urlInput.value = saved.appUrl;
+  if (document.activeElement !== closeTabsInput) closeTabsInput.checked = saved.closeSuccessfulTabs;
   try {
     const response = await fetch(`${String(saved.appUrl).replace(/\/$/, '')}/browser-bridge/status`, {
       cache: 'no-store'
@@ -34,7 +34,7 @@ async function refresh() {
     const transport = live.transport === 'websocket' ? 'live channel' : live.transport === 'polling' ? 'recovery polling' : 'offline';
     showStatus(live.connected ? 'connected' : 'disconnected', live.connected
       ? `Connected to PriceMonitor · ${transport}`
-      : 'PriceMonitor does not see a live extension connection.');
+      : 'PriceMonitor is reachable. Manual page capture is available; the background channel is offline.');
   } catch (error) {
     showStatus('disconnected', `PriceMonitor is unavailable: ${String(error?.message || error)}`);
   }

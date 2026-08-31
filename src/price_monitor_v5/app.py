@@ -13,6 +13,7 @@ from .browser_bridge import BrowserBridge, EXTENSION_ORIGIN
 from .monitor import MarketplaceMonitor
 from .sources import marketplace_url
 from .exporter import write_monitoring_export
+from .page_capture import register_page_capture
 
 
 def create_app(settings=None, store=None, transport=None):
@@ -37,6 +38,7 @@ def create_app(settings=None, store=None, transport=None):
     app = FastAPI(title="Price Monitor v5",version=__version__,lifespan=lifespan)
     app.add_middleware(CORSMiddleware,allow_origins=[EXTENSION_ORIGIN],allow_methods=["GET","POST","OPTIONS"],allow_headers=["content-type"])
     app.state.catalog, app.state.monitor, app.state.browser_bridge = catalog, monitor, bridge
+    register_page_capture(app, catalog, monitor, start_lock)
 
     @app.middleware("http")
     async def local_writes(request: Request, call_next):
@@ -72,7 +74,9 @@ def create_app(settings=None, store=None, transport=None):
 
     @app.get("/browser-bridge/status")
     async def bridge_status():
-        return bridge.status()
+        with catalog.connect() as db:
+            revision = db.execute('SELECT COUNT(*) FROM v5_capture_receipts').fetchone()[0]
+        return {**bridge.status(), 'capture_revision': revision}
 
     def extension(request):
         if request.headers.get("origin") != EXTENSION_ORIGIN:

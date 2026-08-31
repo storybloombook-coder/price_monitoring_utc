@@ -76,7 +76,7 @@ function extractRenderedPage(model) {
   const securityChallenge = /verify you are human|just a moment|checking your browser/i.test(text) ||
     Boolean(document.querySelector('#challenge-running, #challenge-stage, .h-captcha iframe, iframe[src*="hcaptcha.com"][title*="challenge"]'));
   const clone = document.documentElement.cloneNode(true);
-  clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript').forEach(node => node.remove());
+  clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript, input, textarea, select, iframe').forEach(node => node.remove());
   const html = clone.outerHTML;
   return { url: location.href, title: document.title, html: html.slice(0, 7900000),
     security_challenge: securityChallenge, incomplete: html.length > 7900000 };
@@ -166,6 +166,18 @@ async function acceptJob(job) {
   const domain = domains[job.shop_key];
   const url = new URL(job.url);
   if (!domain || url.protocol !== 'https:' || ![domain, `www.${domain}`].includes(url.hostname) || url.username || url.password || (url.port && url.port !== '443')) throw new Error('Only marketplace comparison pages are allowed');
+  if (job.shop_key === 'salidzini') {
+    const tabs = await chrome.tabs.query({ url: ['https://salidzini.lv/*', 'https://www.salidzini.lv/*'] });
+    const existing = tabs.find(tab => tab.url === job.url);
+    if (existing) await chrome.tabs.update(existing.id, { active: true });
+    else await chrome.tabs.create({ url: job.url, active: true });
+    // Release the timed monitoring job. The user's tab and explicit page capture
+    // remain usable indefinitely, even after this run completes or reconnects.
+    await submit(job.id, { url: job.url, html: '', security_challenge: true,
+      error: 'Complete Salidzini CAPTCHA, then click Send to PriceMonitor in the extension. No time limit; review captured prices before saving.' });
+    await setStatus('attention', 'Salidzini is ready for manual verification and Send to PriceMonitor');
+    return;
+  }
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
   const ruleId = tab.id + 100000;
   await chrome.declarativeNetRequest.updateSessionRules({addRules: [{id:ruleId, priority:1, action:{type:'block'}, condition:{tabIds:[tab.id], resourceTypes:['main_frame'], excludedRequestDomains:[domain]}}]});
@@ -279,5 +291,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 void chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+importScripts('page-capture.js');
 void configureLiveChannel();
 void resumeJobs().catch(error => setStatus('reconnecting', String(error)));

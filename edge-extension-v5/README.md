@@ -1,4 +1,30 @@
-# PriceMonitor v5 Marketplace Bridge
+# PriceMonitor v5 Marketplace Bridge · 5.0.6
+
+After updating the portable app, reload this unpacked extension in Edge/Chrome.
+
+## Salidzini: capture the page you have already opened
+
+Start a monitoring run with Salidzini enabled. Open its search page, complete
+the CAPTCHA yourself, then click this extension on that same tab. Check the
+original monitoring SKU and click **Send to PriceMonitor**. The page is read
+without reloading or opening another tab; there is no manual-verification timer.
+
+Review the seller/title/price rows and click **Save selected prices**. Nothing
+is applied before your confirmation. Send each results page separately; mark
+**All pages and offers reviewed** only after reviewing the entire search.
+Incomplete collections remain Action required with captured prices visible.
+
+Snapshots and your selections survive closing the popup. Offline snapshots
+are queued on this computer (up to 5 pages, 2 MB each, within the total queue
+limit), retrying every 30 seconds. A confirmed save retries with the same ID,
+preventing duplicate updates after lost acknowledgements. If a run/result
+changes, refresh and review again. Changing the app address does not redirect
+queued data to another instance. Discard removes a local snapshot; it cannot
+undo a save already accepted by the app.
+
+Page HTML is removed from the queue after saving/discarding. No cookies or
+passwords are transferred. Captured page text may include visible personal
+information, so capture only the intended marketplace results pages.
 
 Optional extension for Edge/Chrome. v5 also works without it, using marketplace
 HTML and manual seller entry.

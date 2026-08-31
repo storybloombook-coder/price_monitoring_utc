@@ -64,6 +64,7 @@ class CatalogStore(BaseCatalog):
                 CREATE TABLE IF NOT EXISTS v5_manual_history (
                     id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, item_id INTEGER NOT NULL,
                     marketplace_key TEXT NOT NULL, decision TEXT NOT NULL, decided_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS v5_capture_receipts (id TEXT PRIMARY KEY, result TEXT NOT NULL);
             """)
 
     def _replace_shop_links(self, db, item_id, links):

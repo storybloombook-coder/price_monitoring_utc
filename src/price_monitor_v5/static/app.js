@@ -36,7 +36,7 @@ const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not 
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
   hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
-  salidzini: 'Read seller offers from accessible Salidzini marketplace HTML or a browser capture. hCaptcha must be completed by you; the app does not bypass it. If reliable rows are unavailable, enter the seller, price and comparison link manually. Partial results require review and are not Not found. No retailer pages are opened.'
+  salidzini: 'Complete hCaptcha yourself, then click Send to PriceMonitor in the v5.0.6 extension on the same Salidzini tab. No reload or manual-verification time limit. Review and save prices in the extension; send each results page separately. Offline captures are queued locally. Partial results require review and are not Not found. No retailer pages are opened.'
 };
 function parsingInfo(key, label = key) {
   const help = PARSING_HELP[key] ? PARSING_HELP[key] + SEARCH_FALLBACK_HELP : null;
@@ -220,6 +220,12 @@ async function loadBrowserBridge() {
   const root = byId('browser-bridge-state');
   try {
     const bridge = await api('/browser-bridge/status');
+    const capturesChanged = state.captureRevision != null && state.captureRevision !== bridge.capture_revision;
+    state.captureRevision = bridge.capture_revision;
+    if (capturesChanged && state.currentRunId) {
+      await pollRun(state.currentRunId);
+      await loadMonitoringHistory();
+    }
     root.classList.toggle('connected', bridge.connected);
     const current = bridge.jobs?.[0];
     const detail = current ? ` · checking ${current.shop_key} for ${current.model}` : '';
@@ -605,7 +611,9 @@ function renderActionRequired(run) {
     const attrs = `data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}"`;
     const cooldown = false;
     const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : '';
-    const retryAction = cooldown
+    const retryAction = item.action_key === 'salidzini'
+      ? '<span class="muted">After CAPTCHA, open the PriceMonitor extension → Send to PriceMonitor → review and save. No time limit; keep this tab open.</span>'
+      : cooldown
       ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
       : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;
     const cooldownChoice = cooldown ? `<span class="action-cooldown-choice">Paused until ${escapeHtml(retryAt)}. Choose automatic waiting or enter a manual result now.</span>` : '';

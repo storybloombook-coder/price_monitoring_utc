@@ -7,12 +7,21 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <header><span class="mark">PM</span><div><strong>PriceMonitor v5 Bridge</strong><small>Marketplace extension · v5.0.0</small></div></header>
+  <header><span class="mark">PM</span><div><strong>PriceMonitor v5 Bridge</strong><small>Marketplace extension · v5.0.6</small></div></header>
+  <section class="capture-panel">
+    <h2>Salidzini · current page</h2>
+    <p>Complete the CAPTCHA in your tab, then send that page without reloading. No time limit.</p>
+    <label>Original monitoring SKU<input id="capture-model" type="text" placeholder="25G64" maxlength="100"></label>
+    <button id="capture-current" type="button">Send to PriceMonitor</button>
+    <div id="capture-message" role="status" aria-live="polite"></div>
+    <div id="capture-queue"></div>
+  </section>
   <section id="status" class="status">Checking connection…</section>
   <label>PriceMonitor address<input id="app-url" type="url" value="http://127.0.0.1:8050"></label>
   <label class="check"><input id="close-tabs" type="checkbox" checked> Close successfully captured tabs</label>
   <button id="save" type="button">Save and connect</button>
-  <p>The extension opens a visible retailer tab only when direct monitoring is blocked. Complete any security check in that tab.</p>
+  <p>Only marketplace pages are captured. Queued snapshots stay on this computer until saved or discarded; prices require your confirmation.</p>
   <script src="popup.js"></script>
+  <script src="popup-capture.js"></script>
 </body>
 </html>

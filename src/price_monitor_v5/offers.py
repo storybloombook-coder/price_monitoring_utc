@@ -241,7 +241,11 @@ def parse_page(key, model, content, page_url):
             money = row.first("price", "item_price", "offer-price")
             if matched_model(key, model, evidence):
                 if seller and money:
-                    offers.append({"store": seller.text(), "price_eur": price(money.text()), "title": evidence,
+                    cash = money.text()
+                    if key == 'salidzini' and not re.fullmatch(r'\s*(?:€|EUR)?\s*\d+(?:[ .]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR)?\s*', cash, re.I):
+                        rejected += 1
+                        continue
+                    offers.append({"store": seller.text(), "price_eur": price(cash), "title": evidence,
                                    "availability": availability(row.text())})
                 else:
                     rejected += 1
@@ -274,6 +278,15 @@ def parse_page(key, model, content, page_url):
             page_number = current_page = 0
         if same_path and (next_page or page_number > current_page) and url not in links:
             links.append(url)
+        if key == "salidzini" and same_path:
+            following, current = parse_qs(urlsplit(url).query), parse_qs(urlsplit(page_url).query)
+            try:
+                next_offset, current_offset = int(following.pop("offset", ["0"])[0]), int(current.pop("offset", ["0"])[0])
+            except ValueError:
+                continue
+            # Keep the SKU and all filters unchanged; never follow related searches.
+            if following == current and next_offset > current_offset and url not in links:
+                links.append(url)
     normalized, seen = [], set()
     for raw in offers:
         try:
