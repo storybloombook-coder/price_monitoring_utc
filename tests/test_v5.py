@@ -13,6 +13,7 @@ from price_monitor_v5.browser_bridge import BrowserBridge
 from price_monitor_v5.config import Settings
 from price_monitor_v5.app import create_app
 from price_monitor_v5.exporter import write_monitoring_export
+from price_monitor_v5 import __version__
 
 
 PRODUCT_URL = "https://www.hinnavaatlus.ee/6366101/tcl-25-lcd-25g64/"
@@ -150,7 +151,7 @@ def test_manual_offers_correction_not_found_history(store):
 def test_api_disables_shops_and_cleared_run_stays_empty(store,tmp_path):
     app=create_app(Settings.load(tmp_path),store=store)
     with TestClient(app) as client:
-        assert client.get("/health").json()["version"]=="5.0.1"
+        assert client.get("/health").json()["version"]==__version__
         item=client.post("/catalog/items/stock",json={"nomenclature":"TCL 25G64","quantity":0}).json()
         assert len(client.get("/catalog/items?kind=source").json())==1
         assert client.post("/sources/varle/test",json={}).status_code==404

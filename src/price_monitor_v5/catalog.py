@@ -6,7 +6,7 @@ import sqlite3
 from openpyxl import load_workbook
 from price_monitor_v4.catalog import CatalogStore as BaseCatalog, canonicalize, number, utc_now, source_sheet_for_nomenclature
 from .sources import SOURCE_BY_KEY, search_url, marketplace_url, SHOPS
-from .offers import exact_model, compact
+from .offers import exact_model, compact, seller_key
 
 
 def infer_model(text):
@@ -213,7 +213,12 @@ class CatalogStore(BaseCatalog):
             raise KeyError("Run not found")
         tasks = [] if session.get("cleared_at") else self.checks(run_id)
         for task in tasks:
-            offers = task.get("offers", [])
+            # Seller identity is derived, not a price observation. Apply current
+            # aliases to stored/cache results too, without rewriting prices,
+            # timestamps, original seller labels or historical check records.
+            offers = [{**offer, "seller_key": seller_key(offer.get("store"), task["marketplace_key"])}
+                      for offer in task.get("offers", [])]
+            task["offers"] = offers
             def lowest(state):
                 return min((o for o in offers if o["availability"] == state), key=lambda o:o["price_eur"], default=None)
             task["cheapest_in_stock"] = lowest("IN_STOCK")

@@ -34,7 +34,7 @@ ALIASES = {
     "elisa": {"ELISA", "ELISAEE", "ELISAEESTI"},
     "euronics": {"EURONICS", "EURONICSEE", "EURONICSEESTI"},
     "rde": {"RDE", "RDEEE", "RDEELECTRONICS", "RDELECTRONICS", "RDELECTRONICSLEE"},
-    "smartech": {"SMARTECH", "SMARTECHEE"},
+    "smartech": {"SMARTECH", "SMARTECHEE", "SMARTECHSHOP"},
 }
 
 

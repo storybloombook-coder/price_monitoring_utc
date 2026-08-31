@@ -62,6 +62,14 @@ session; use the Russian guide for installation and initial verification.
 - Frozen EXE QA on port 8151 with a separate catalog and normal network access: version 5.0.1, first launch opened the default browser; a second launch logged reuse, opened the existing page and exited without a duplicate server. The EXE itself collected the four 24G54 Hinnavaatlus offers without the extension. Production catalog/history were not used for these test writes.
 - The stable v5 portable folder keeps its existing `v5.0.0` directory name so shortcuts/data paths remain valid; the EXE, UI and package version are 5.0.1. No ZIP generated for this patch. The unchanged v5 extension remains version 5.0.0.
 
+## Patch 5.0.2 — Smartech seller mapping
+
+- The existing 32S4K run already contained 14 Hinnavaatlus offers, including `Smartech Shop` at 157.60 EUR, but its stored `seller_key` was null. This was a seller-name mapping omission, not a missing price or blocked request.
+- Added the exact `Smartech Shop` alias. Existing `Smartech` and `Smartech.ee` aliases and country restrictions remain. No fuzzy removal of words such as Shop/Outlet is used.
+- Seller keys are derived again when presenting a run. Already saved/cached offers now populate the Smartech column without making new requests or rewriting the price, time, original seller name or historical check record. The same data supplies the Excel export.
+- All 80 automated tests passed: case/whitespace aliases, rejected similar/foreign-country names, 32S4K seller-card parsing, preserved unknown availability, old results and cached runs, exact price/time preservation, unchanged stored record, numeric Smartech Excel cell.
+- No Kaina24 collection changes are part of this patch. Its previously diagnosed adapter regression remains a separate issue.
+
 ## Rollback
 
 The v4 source package and portable folder are unchanged. Git tag `v4.2.4` points to
