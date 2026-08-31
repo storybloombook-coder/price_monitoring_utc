@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from .catalog import utc_now
 from .sources import marketplace_url, search_url, MARKETPLACES
-from .offers import parse_page, normalize_offer
+from .offers import parse_page, normalize_offer, shortened_queries, candidate_links
 
 
 class ReviewRequired(ValueError):
@@ -76,7 +76,7 @@ class MarketplaceMonitor:
             async with self.locks[key]:
                 if self.blocked(key) and not capture:
                     raise ReviewRequired("Automatic requests are cooling down. Manual offer entry and browser capture are available now.")
-                task.update(status="RUNNING",error=None,error_code=None,offers=[],cached=False)
+                task.update(status="RUNNING",error=None,error_code=None,offers=[],cached=False,attempts=0)
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
                 async with asyncio.timeout(90 if capture else 65):
@@ -105,9 +105,20 @@ class MarketplaceMonitor:
                     self.store.save_check(task)
 
     async def collect(self, task, client, capture):
+        task.update(search_queries=[], candidate_matches=[], collection_revision=2)
+        queries = [None] + (shortened_queries(task["source_model"]) if task["marketplace_key"] == "hinnavaatlus" else [])
+        for query in queries:
+            task["search_queries"].append(query or task["source_model"])
+            await self.collect_once(task, client, capture, query)
+            if task["status"] != "NOT_FOUND":
+                return
+        if task["candidate_matches"]:
+            task.update(status="ACTION_REQUIRED", coverage="partial", error="Shortened searches found possible model variants. Review the suggested comparison links; no candidate prices were accepted automatically.")
+
+    async def collect_once(self, task, client, capture, query=None):
         key, model = task["marketplace_key"], task["source_model"]
-        saved = task.get("product_url")
-        discovery = search_url(key,model)
+        saved = task.get("product_url") if query is None else None
+        discovery = search_url(key,query or model)
         queue = [saved or discovery]
         seen = set()
         offers = []
@@ -128,6 +139,10 @@ class MarketplaceMonitor:
                 else:
                     content, final = await self.fetch(client,key,url)
                 parsed = parse_page(key,model,content,final)
+                if query and not parsed["offers"] and key == "hinnavaatlus":
+                    for candidate in candidate_links(query, content, final):
+                        if not any(c["url"] == candidate["url"] for c in task["candidate_matches"]):
+                            task["candidate_matches"].append(candidate)
             except httpx.HTTPStatusError as error:
                 if url == saved and error.response.status_code in {404,410} and discovery not in seen:
                     queue.append(discovery)
@@ -168,7 +183,7 @@ class MarketplaceMonitor:
             captured = {(o["store"].lower(), o["price_eur"], o["availability"])
                         for o in unique.values() if urlsplit(o["url"])._replace(query="", fragment="").geturl() == group}
             partial |= len(captured) < expected
-        task.update(offers=list(unique.values()),collection_method="extension" if capture else "marketplace HTML",attempts=len(seen),
+        task.update(offers=list(unique.values()),collection_method="extension" if capture else "marketplace HTML",attempts=task.get("attempts",0)+len(seen),
                     coverage="partial" if partial or queue else "complete", retry_after=None)
         if offers:
             task["status"] = "ACTION_REQUIRED" if partial or queue else "SUCCESS"

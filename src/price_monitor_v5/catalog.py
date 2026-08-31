@@ -5,7 +5,7 @@ import re
 import sqlite3
 from openpyxl import load_workbook
 from price_monitor_v4.catalog import CatalogStore as BaseCatalog, canonicalize, number, utc_now, source_sheet_for_nomenclature
-from .sources import SOURCE_BY_KEY, search_url, marketplace_url, SHOPS
+from .sources import SOURCE_BY_KEY, search_url, marketplace_url, SHOPS, SOURCES
 from .offers import exact_model, compact, seller_key
 
 
@@ -48,6 +48,11 @@ class CatalogStore(BaseCatalog):
     def migrate(self):
         super().migrate()
         with self.connect() as db:
+            # v5 owns its source list. Preserve existing toggles and the historic
+            # rde key (Estonia); Lithuania is a separate seller and column.
+            for order, source in enumerate(SOURCES):
+                db.execute("INSERT INTO monitoring_sources(key,name,kind,country,base_url,enabled,sort_order) VALUES(?,?,?,?,?,1,?) ON CONFLICT(key) DO UPDATE SET name=excluded.name,country=excluded.country,base_url=excluded.base_url,sort_order=excluded.sort_order",
+                           (source.key, source.name, source.kind, source.country, source.base_url, order))
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS marketplace_checks (
                     run_id TEXT NOT NULL REFERENCES monitoring_sessions(run_id),
@@ -170,7 +175,7 @@ class CatalogStore(BaseCatalog):
                 ttl = {"quick": 12, "balanced": 4, "deep": 0}[mode]
                 cached = self.cached_check(item["canonical_model"], key, ttl)
                 if cached:
-                    task.update({k: cached.get(k) for k in ("offers", "status", "finished_at", "coverage", "collection_method", "product_url", "error")})
+                    task.update({k: cached.get(k) for k in ("offers", "status", "finished_at", "coverage", "collection_method", "product_url", "error", "collection_revision")})
                     task["cached"] = True
                 self.save_check(task)
 
@@ -180,7 +185,12 @@ class CatalogStore(BaseCatalog):
         with self.connect() as db:
             rows = db.execute("SELECT c.data FROM marketplace_checks c JOIN monitoring_sessions s ON s.run_id=c.run_id WHERE c.canonical_model=? AND c.marketplace_key=? AND s.cleared_at IS NULL ORDER BY s.created_at DESC LIMIT 1", (canonical,key)).fetchall()
         threshold = (datetime.now(UTC)-timedelta(hours=hours)).isoformat()
-        return next((t for r in rows if (t:=json.loads(r[0])).get("finished_at", "") >= threshold and t.get("status")=="SUCCESS" and t.get("coverage") == "complete" and t.get("collection_method") != "manual"), None)
+        for row in rows:
+            task = json.loads(row[0])
+            outdated_senukai = key == "kaina24" and (task.get("collection_revision") or 0) < 2 and any(seller_key(o.get("store"), key) == "senukai" for o in task.get("offers", []))
+            if not outdated_senukai and task.get("finished_at", "") >= threshold and task.get("status") == "SUCCESS" and task.get("coverage") == "complete" and task.get("collection_method") != "manual":
+                return task
+        return None
 
     def save_check(self, task):
         with self._lock, self.connect() as db:

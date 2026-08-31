@@ -31,7 +31,16 @@ const STATUS_HELP = {
   disabled: 'This source is switched off and is not included in monitoring.'
 };
 STATUS_HELP['not-listed'] = 'The completed marketplace pages did not list this shop. This does not mean the shop has no stock.';
-STATUS_HELP.unverified = 'Marketplace coverage is incomplete; this shop cannot be assessed yet.';
+STATUS_HELP.unverified = 'Not verified: one or more marketplace checks are pending, blocked, stopped or incomplete. This is NOT Not found; no conclusion about this shop is possible yet.';
+const PARSING_HELP = {
+  kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
+  hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
+  salidzini: 'Read seller offers from accessible Salidzini marketplace HTML or a browser capture. hCaptcha must be completed by you; the app does not bypass it. If reliable rows are unavailable, enter the seller, price and comparison link manually. Partial results require review and are not Not found. No retailer pages are opened.'
+};
+function parsingInfo(key, label = key) {
+  const help = PARSING_HELP[key];
+  return help ? `<span class="parsing-info"><button type="button" class="info-button" aria-label="How ${escapeHtml(label)} parsing works" aria-describedby="parsing-${escapeHtml(key)}">i</button><span role="tooltip" id="parsing-${escapeHtml(key)}">${escapeHtml(help)}</span></span>` : '';
+}
 STATUS_HELP.cached = 'A recent marketplace observation was reused. Its original collection time is preserved.';
 const state = {
   source: [], sourceOptions: [], stock: [], summary: null, sources: [], tasks: [], shopResults: [], runPoll: null,
@@ -102,6 +111,7 @@ function updateRunModeHelp() {
   const mode = byId('run-mode').value;
   localStorage.setItem(RUN_MODE_KEY, mode);
   byId('run-mode-help').textContent = RUN_MODE_HELP[mode] || RUN_MODE_HELP.balanced;
+  byId('cache-summary').textContent = mode === 'deep' ? '· fresh checks' : `· cache up to ${mode === 'quick' ? 12 : 4} hours`;
 }
 
 function itemStatus(item) {
@@ -172,7 +182,7 @@ async function loadCatalog() {
 }
 
 function sourceSwitch(item) {
-  const identity = item.kind === 'marketplace' ? `<a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>` : `<span>${escapeHtml(item.name)}</span>`;
+  const identity = item.kind === 'marketplace' ? `<span class="source-title"><a href="${escapeHtml(item.base_url)}" target="_blank" rel="noopener">${escapeHtml(item.name)}</a>${parsingInfo(item.key, item.name)}</span>` : `<span>${escapeHtml(item.name)}</span>`;
   return `<div class="source-item ${item.master_enabled ? '' : 'master-disabled'}"><div class="source-identity">${identity}<span class="learned-method">${item.kind === 'shop' ? 'Seller filter · no direct requests' : 'Comparison pages only'}</span></div>
     <div class="source-controls">
     <label class="switch-row" aria-label="Enable ${escapeHtml(item.name)}"><input type="checkbox" data-source-key="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''} ${item.master_enabled ? '' : 'disabled'}><span class="switch"></span></label></div></div>`;
@@ -183,6 +193,8 @@ function renderSources() {
   const shops = state.sources.filter(item => item.kind === 'shop');
   byId('marketplace-master').checked = marketplaces[0]?.master_enabled ?? true;
   byId('shop-master').checked = shops[0]?.master_enabled ?? true;
+  byId('marketplace-count').textContent = `${marketplaces.filter(s => s.effective_enabled).length} of ${marketplaces.length} enabled`;
+  byId('shop-count').textContent = `${shops.filter(s => s.effective_enabled).length} of ${shops.length} seller filters enabled`;
   byId('marketplace-list').innerHTML = marketplaces.map(sourceSwitch).join('');
   const countries = ['Lithuania', 'Latvia', 'Estonia'];
   byId('shop-list').innerHTML = countries.map(country => {
@@ -200,7 +212,7 @@ async function loadSources() {
   state.sources = await api('/sources'); renderSources();
   state.resultRenderSignature = '';
   if (state.currentRunId) await pollRun(state.currentRunId);
-  else if (state.tasks.length || state.shopResults.length) renderResults();
+  else renderResults();
 }
 
 async function loadBrowserBridge() {
@@ -343,7 +355,7 @@ function previousDecisionHtml(decision) {
   return decision ? `<span class="previous-decision"><b>Previous manual decision:</b> ${escapeHtml(manualDecisionText(decision))}</span>` : '';
 }
 function offerLink(offer, warning = '') {
-  if (!offer) return '—'; const label = `${euro(offer.price_eur)}${offer.store ? ` · ${escapeHtml(offer.store)}` : ''}`;
+  if (!offer) return '—'; const label = `${euro(offer.price_eur)}${offer.store ? ` · ${escapeHtml(offer.store)}` : ''}${offer.price_basis === 'loyalty' ? ' · Loyalty price' : ''}${offer.matched_model ? ` · matched ${escapeHtml(offer.matched_model)}` : ''}`;
   const attrs = warning ? ` class="price-anomaly" title="${escapeHtml(warning)}"` : '';
   return offer.url ? `<a${attrs} href="${escapeHtml(offer.url)}" target="_blank" rel="noopener">${label}${warning ? ' ⚠' : ''}</a>` : `<span${attrs}>${label}${warning ? ' ⚠' : ''}</span>`;
 }
@@ -388,7 +400,7 @@ function aggregateResults() {
     const inStock = observations.filter(o => o.availability === 'IN_STOCK');
     const best = [...(inStock.length ? inStock : observations)].sort((a,b) => a.price_eur-b.price_eur)[0];
     const complete = row.tasks.length && row.tasks.every(t => ['SUCCESS','NOT_FOUND'].includes(t.status) && t.coverage === 'complete');
-    row.shops[result.shop_key] = {...result, observations, price_eur:best?.price_eur, availability:best?.availability,
+    row.shops[result.shop_key] = {...result, observations, price_eur:best?.price_eur, availability:best?.availability, price_basis:best?.price_basis,
       status:best ? 'SUCCESS' : complete ? 'NOT_LISTED' : 'UNVERIFIED', coverage:complete ? 'complete' : 'partial'};
     row.itemId = Number(result.item_id);
   });
@@ -489,7 +501,7 @@ function shopCell(row, shop, openDetails) {
   const item = row.shops[shop.key];
   if (!item) return '—';
   const detailKey = `${row.key}:shop:${shop.key}`;
-  const label = item.price_eur != null ? euro(item.price_eur) : item.status.replaceAll('_', ' ');
+  const label = item.price_eur != null ? euro(item.price_eur) + (item.price_basis === 'loyalty' ? ' · Loyalty price' : '') : item.status.replaceAll('_', ' ');
   const observations = (item.observations || []).map(offer => `<div class="v5-offer"><b>${escapeHtml(offer.marketplace)}</b>${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="muted">${escapeHtml(new Date(offer.checked_at).toLocaleString('en-GB'))}${offer.cached ? ' · cached' : ''}</span></div>`).join('');
   const warning = priceAnomalyWarning(row, item.price_eur);
   return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary><span class="${warning ? 'price-anomaly' : ''}" title="${escapeHtml(warning)}">${badge(label, statusClass(item.status))}</span></summary><div class="detail-offer"><span>Marketplace observations only. The retailer was not queried.</span>${item.coverage !== 'complete' ? '<span class="muted">Coverage incomplete — more offers may exist.</span>' : ''}${observations || '<span>No captured offers from this seller.</span>'}</div></details>`;
@@ -578,6 +590,7 @@ function renderActionRequired(run) {
     status: item.status,
     retry_after: item.retry_after || '',
     previous: item.previous_manual_resolution || null,
+    candidates: item.candidate_matches || [],
   })));
   const editing = byId('action-items').querySelector('.action-popover:not([hidden]):not(.saved)');
   if (renderSignature !== state.actionRenderSignature && !editing) {
@@ -595,7 +608,8 @@ function renderActionRequired(run) {
       ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
       : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;
     const cooldownChoice = cooldown ? `<span class="action-cooldown-choice">Paused until ${escapeHtml(retryAt)}. Choose automatic waiting or enter a manual result now.</span>` : '';
-    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}${retryAction}
+    const candidates = item.candidate_matches?.length ? `<div class="candidate-matches"><strong>Possible variants — review before entering a price</strong>${item.candidate_matches.map(c => `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`).join('')}<span class="muted">These links are suggestions, not confirmed SKU matches.</span></div>` : '';
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}${candidates}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}${retryAction}
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" value="${escapeHtml(previousPrice)}" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;

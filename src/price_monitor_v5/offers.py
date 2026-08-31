@@ -34,12 +34,15 @@ ALIASES = {
     "elisa": {"ELISA", "ELISAEE", "ELISAEESTI"},
     "euronics": {"EURONICS", "EURONICSEE", "EURONICSEESTI"},
     "rde": {"RDE", "RDEEE", "RDEELECTRONICS", "RDELECTRONICS", "RDELECTRONICSLEE"},
+    "rde_lt": {"RDELT"},
     "smartech": {"SMARTECH", "SMARTECHEE", "SMARTECHSHOP"},
 }
 
 
 def seller_key(name, marketplace_key=None):
     token = compact(name)
+    if token == "RDE" and marketplace_key == "kaina24":
+        return "rde_lt"
     matched = next((key for key, names in ALIASES.items() if token in names), None)
     if matched and marketplace_key:
         shop = SOURCE_BY_KEY[matched]
@@ -47,6 +50,43 @@ def seller_key(name, marketplace_key=None):
         if token != domain and shop.country != SOURCE_BY_KEY[marketplace_key].country:
             return None  # Same brand in another country is not the configured shop.
     return matched
+
+
+# Explicit regional names, not a general suffix-stripping match rule. TCL's
+# Italian pages use HE headings and H identifiers for these two soundbars:
+# https://www.tcl.com/it/it/soundbar/s55h
+# https://www.tcl.com/it/it/support-soundbar/model/s45h
+HINNA_MODEL_ALIASES = {"S45HE": "S45H", "S55HE": "S55H"}
+
+
+def matched_model(key, model, text):
+    if exact_model(model, text):
+        return model
+    alias = HINNA_MODEL_ALIASES.get(compact(re.sub(r"^TCL[\s_-]*", "", model, flags=re.I))) if key == "hinnavaatlus" else None
+    return alias if alias and exact_model(alias, text) else None
+
+
+def shortened_queries(model):
+    original = re.sub(r"^TCL[\s_-]*", "", model.strip(), flags=re.I)
+    return [value for width in (1, 2) if len(value := original[:-width].strip()) >= 3
+            and re.search(r"[A-Za-z]", value) and re.search(r"\d", value)]
+
+
+def candidate_links(query, content, page_url):
+    """Suggestions only: truncated model prefixes never authorize a price."""
+    matches = []
+    for node in Document(content).root.nodes():
+        if node.tag != "a" or not node.has("product-name"):
+            continue
+        if not any(token.startswith(compact(query)) for token in re.findall(r"[A-Z0-9]+", node.text().upper())):
+            continue
+        try:
+            url = marketplace_url("hinnavaatlus", urljoin(page_url, node.attrs.get("href", "")))
+        except ValueError:
+            continue
+        if re.match(r"/\d+/", urlsplit(url).path):
+            matches.append({"title": node.text()[:600], "url": url, "query": query})
+    return matches[:20]
 
 
 def price(value):
@@ -129,12 +169,17 @@ def normalize_offer(key, model, raw, page_url, *, manual=False):
     value = price(raw.get("price_eur"))
     seller = str(raw.get("store") or raw.get("seller_name") or "").strip()[:120]
     title = str(raw.get("title") or model).strip()[:600]
-    if not value or not seller or (not manual and not exact_model(model, title)):
+    match = matched_model(key, model, title)
+    if not value or not seller or (not manual and not match):
         raise ValueError("A seller, positive price and exact model evidence are required")
     state = str(raw.get("availability") or "UNKNOWN")
     if state not in {"IN_STOCK", "PRE_ORDER", "UNKNOWN", "OUT_OF_STOCK"}:
         raise ValueError("Invalid availability")
-    return {"store": seller, "seller_key": seller_key(seller,key), "title": title,
+    evidence = {"matched_model": match} if match and compact(match) != compact(model) else {}
+    basis = raw.get("price_basis")
+    if basis in {"loyalty", "regular"}:
+        evidence["price_basis"] = basis
+    return {**evidence, "store": seller, "seller_key": seller_key(seller,key), "title": title,
             "price_eur": value, "availability": state, "marketplace_key": key,
             "url": marketplace_url(key, raw.get("url") or page_url), "manual": manual}
 
@@ -150,7 +195,7 @@ def parse_page(key, model, content, page_url):
     nodes = list(doc.nodes())
     title = next((n.text() for n in nodes if n.tag == "h1"), "")
     is_product = (key == "hinnavaatlus" and bool(re.match(r"/\d+/", urlsplit(page_url).path))) or (key == "kaina24" and "/p/" in page_url)
-    product_match = is_product and exact_model(model, title)
+    product_match = is_product and bool(matched_model(key, model, title))
     offers, links, rejected = [], [], 0
     if key == "hinnavaatlus":
         rows = [n for n in nodes if n.tag == "tr" and n.has("offer")]
@@ -188,7 +233,7 @@ def parse_page(key, model, content, page_url):
         except ValueError:
             continue
         path = urlsplit(url).path
-        if exact_model(model, node.text()) and ((key == "hinnavaatlus" and re.match(r"/\d+/", path)) or (key == "kaina24" and path.startswith("/p/"))):
+        if matched_model(key, model, node.text()) and ((key == "hinnavaatlus" and re.match(r"/\d+/", path)) or (key == "kaina24" and path.startswith("/p/"))):
             if url not in links and url != page_url:
                 links.append(url)
         # Follow pagination on the same comparison/search page, not categories,
@@ -214,6 +259,9 @@ def parse_page(key, model, content, page_url):
             rejected += 1
     text = doc.text().lower()
     empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|0 rezultāti|nekas netika atrasts", text))
+    if key == "hinnavaatlus" and urlsplit(page_url).path.rstrip("/") == "/search":
+        known_results = title.lower().startswith("otsing:") and any(n.has("product-name") for n in nodes)
+        empty |= known_results and not any(re.match(r"/\d+/", urlsplit(u).path) for u in links)
     # Unfamiliar markup or zero extracted offers is NOT proof of absence.
     return {"offers": normalized, "links": links, "not_found": empty and not normalized,
             "rejected": rejected, "title": title,

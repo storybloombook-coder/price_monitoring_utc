@@ -7,7 +7,7 @@ from price_monitor_v5.app import create_app
 from price_monitor_v5.config import Settings
 from price_monitor_v5.catalog import CatalogStore
 
-settings = Settings.load(Path("build/v5-ui-qa-501"))
+settings = Settings.load(Path("build/v5-ui-qa-504"))
 store = CatalogStore(settings.catalog_database)
 if not store.list_items("source"):
     for model in ["25G64", "75C6K"]:

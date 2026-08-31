@@ -20,7 +20,7 @@ def write_monitoring_export(path, run):
     sheet.title = "Monitoring"
     sheet.append(["Model","Marketplace min price","Marketplace max price","Lowest in-stock","Lowest pre-order",*[s.name for s in SHOPS],"Stock quantity","Unit cost, EUR","Status"])
     details = book.create_sheet("All seller offers")
-    details.append(["Model","Marketplace","Seller","Price, EUR","Availability","Marketplace link","Checked at (UTC)","Method","Coverage"])
+    details.append(["Model","Marketplace","Seller","Price, EUR","Availability","Marketplace link","Checked at (UTC)","Method","Coverage","Price basis","Matched model"])
     checks = book.create_sheet("Checks")
     checks.append(["Model","Marketplace","Status","Coverage","Error","Checked at (UTC)"])
     for item_id in dict.fromkeys(t["item_id"] for t in run["tasks"]):
@@ -33,6 +33,8 @@ def write_monitoring_export(path, run):
                 offer = task.get(field) or task.get("lowest_reported" if field == "cheapest_in_stock" else "highest_reported")
                 if offer:
                     note = "" if task.get(field) else " [reported price; " + offer["availability"].replace("_", " ").lower() + "]"
+                    if offer.get("price_basis") == "loyalty":
+                        note += " [loyalty price]"
                     lines.append(f"{task['marketplace']}: {offer['price_eur']:.2f} EUR ({offer['store']})" + note + (" [partial]" if task.get("coverage") != "complete" else ""))
                 else:
                     lines.append(f"{task['marketplace']}: {task['status']} / no in-stock price")
@@ -52,7 +54,7 @@ def write_monitoring_export(path, run):
         for task in tasks:
             checks.append([safe(model),task["marketplace"],task["status"],task.get("coverage","partial"),safe(task.get("error")),checked_time(task.get("finished_at"))])
             for offer in task.get("offers",[]):
-                details.append([safe(model),task["marketplace"],safe(offer["store"]),offer["price_eur"],offer["availability"],offer["url"],checked_time(task.get("finished_at")),task.get("collection_method"),task.get("coverage")])
+                details.append([safe(model),task["marketplace"],safe(offer["store"]),offer["price_eur"],offer["availability"],offer["url"],checked_time(task.get("finished_at")),task.get("collection_method"),task.get("coverage"),offer.get("price_basis", "not recorded"),safe(offer.get("matched_model") or model)])
                 details.cell(details.max_row,6).hyperlink = offer["url"]
     for ws in book:
         ws.freeze_panes = "B2"

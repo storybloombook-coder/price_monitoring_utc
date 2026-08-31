@@ -285,6 +285,21 @@ dialog form { padding: 20px; }
   .summary-text { display: none; }
 }
 /* v5 marketplace offer evidence */
+.source-settings { align-items: start; }
+.source-disclosure > summary { padding: 0; }
+.source-disclosure > summary small { display: block; margin-top: 5px; }
+.source-disclosure:not([open]) > summary .collapse-button svg { transform: rotate(180deg); }
+.source-disclosure[open] > summary { margin-bottom: 16px; }
+.source-title { display: flex; align-items: center; gap: 7px; }
+.parsing-info { position: relative; display: inline-flex; }
+.info-button { width: 21px; height: 21px; padding: 0; border: 1px solid var(--brand); border-radius: 50%; background: transparent; color: var(--brand); font: italic 700 13px Georgia,serif; }
+.info-button:hover, .info-button:focus { color: white; background: var(--brand); }
+.parsing-info [role="tooltip"] { display: none; position: absolute; z-index: 50; top: 27px; left: -110px; width: min(320px,70vw); padding: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 6px 20px #0002; font-size: 12px; line-height: 1.5; color: var(--text); font-weight: 400; }
+.parsing-info:hover [role="tooltip"], .parsing-info:focus-within [role="tooltip"] { display: block; }
+.advanced-settings { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+.advanced-settings > summary { cursor: pointer; padding: 6px 0; }
+.advanced-settings .run-mode-control { margin: 8px 0; }
+.candidate-matches { display: grid; gap: 6px; margin: 8px 0; padding: 10px; background: #fff4d5; border-radius: 8px; }
 .v5-offer { display: flex; flex-direction: column; gap: 5px; padding: 9px 0; border-bottom: 1px solid #e1e8e4; }
 .offer-controls { display: flex; gap: 12px; flex-wrap: wrap; }
 .badge.not-listed { color: #566170; background: #edf0f4; }

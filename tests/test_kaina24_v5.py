@@ -54,7 +54,7 @@ def test_legacy_search_cards_use_seller_cash_price_not_financing_or_summary():
     html = '<a href="/p/tcl-24g54/" title="TCL 24G54">nuo 99 €</a>' + card() + card("Rde.lt", "106.56")
     result = parse(html, SEARCH_URL)
     assert [o["price_eur"] for o in result["offers"]] == [104.40, 106.56]
-    assert [o["seller_key"] for o in result["offers"]] == ["bite", None]
+    assert [o["seller_key"] for o in result["offers"]] == ["bite", "rde_lt"]
     assert all(o["availability"] == "UNKNOWN" and o["url"] == URL for o in result["offers"])
     assert result["links"] == [URL] and not result["partial"]
 

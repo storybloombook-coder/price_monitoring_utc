@@ -1,13 +1,14 @@
 from dataclasses import replace
 from urllib.parse import urlsplit, unquote
 import re
-from price_monitor_v4.sources import SOURCES as V4_SOURCES, search_phrase
+from price_monitor_v4.sources import SOURCES as V4_SOURCES, MonitoringSource, search_phrase
 
 SOURCES = tuple(replace(source, search_template={
     "kaina24": "https://www.kaina24.lt/s/{query}/",
     "salidzini": "https://www.salidzini.lv/cena?q={query}",
     "hinnavaatlus": "https://www.hinnavaatlus.ee/search/?query={query}",
-}.get(source.key)) for source in V4_SOURCES)
+}.get(source.key), name="RDE.ee" if source.key == "rde" else source.name) for source in V4_SOURCES)
+SOURCES = SOURCES + (MonitoringSource("rde_lt", "RDE.lt", "shop", "Lithuania", "https://www.rde.lt/"),)
 SOURCE_BY_KEY = {source.key: source for source in SOURCES}
 MARKETPLACES = tuple(s for s in SOURCES if s.kind == "marketplace")
 SHOPS = tuple(s for s in SOURCES if s.kind == "shop")

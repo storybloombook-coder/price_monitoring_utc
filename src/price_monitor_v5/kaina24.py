@@ -31,7 +31,7 @@ def seller_name(row, product):
     return next((n.text() for n in row.nodes() if n.attrs.get("itemprop") == "seller"), "")
 
 
-def cash_price(row):
+def cash_price(row, seller=""):
     money = row.first("price")
     if not money:
         return None
@@ -40,7 +40,8 @@ def cash_price(row):
     # Kaina sometimes advertises a club price with the ordinary price in a note.
     conditional = (re.search(r"klubo nariams|lojalumo|su kortele", text, re.I)
                    or ("*" in value and re.search(r"su kodu|kupon", text, re.I)))
-    if conditional:
+    senukai_card = compact(seller) in {"SENUKAI", "SENUKAILT"} and bool(re.search(r"smart\s*net|lojalumo|su kortele", text, re.I))
+    if conditional and not senukai_card:
         ordinary = re.search(r"ne lojalumo programos nariams taikoma kaina\s*([\d\s.,]+)\s*(?:€|EUR)", text, re.I)
         return price(ordinary[1]) if ordinary else None
     # Reject multiple prices or financing text inside a changed price node.
@@ -101,8 +102,11 @@ def parse_kaina(model, root, page_url):
                 if compare not in links:
                     links.append(compare)
         try:
+            seller = seller_name(row, product)
+            loyalty = compact(seller) in {"SENUKAI", "SENUKAILT"} and bool(re.search(r"smart\s*net|lojalumo|su kortele", row.text(), re.I))
             offers.append(normalize_offer("kaina24", model, {
-                "store": seller_name(row, product), "price_eur": cash_price(row),
+                "store": seller, "price_eur": cash_price(row, seller),
+                "price_basis": "loyalty" if loyalty else "regular",
                 "title": evidence, "availability": stock_state(row), "url": target,
             }, page_url))
         except (ValueError, TypeError):
