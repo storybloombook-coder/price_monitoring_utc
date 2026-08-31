@@ -56,13 +56,13 @@ def seller_key(name, marketplace_key=None):
 # Italian pages use HE headings and H identifiers for these two soundbars:
 # https://www.tcl.com/it/it/soundbar/s55h
 # https://www.tcl.com/it/it/support-soundbar/model/s45h
-HINNA_MODEL_ALIASES = {"S45HE": "S45H", "S55HE": "S55H"}
+MODEL_ALIASES = {"S45HE": "S45H", "S55HE": "S55H"}
 
 
 def matched_model(key, model, text):
     if exact_model(model, text):
         return model
-    alias = HINNA_MODEL_ALIASES.get(compact(re.sub(r"^TCL[\s_-]*", "", model, flags=re.I))) if key == "hinnavaatlus" else None
+    alias = MODEL_ALIASES.get(compact(re.sub(r"^TCL[\s_-]*", "", model, flags=re.I)))
     return alias if alias and exact_model(alias, text) else None
 
 
@@ -72,19 +72,41 @@ def shortened_queries(model):
             and re.search(r"[A-Za-z]", value) and re.search(r"\d", value)]
 
 
-def candidate_links(query, content, page_url):
+def candidate_links(query, content, page_url, key="hinnavaatlus"):
     """Suggestions only: truncated model prefixes never authorize a price."""
-    matches = []
-    for node in Document(content).root.nodes():
-        if node.tag != "a" or not node.has("product-name"):
+    matches, seen = [], set()
+    root = Document(content).root
+    if key == "hinnavaatlus":
+        entries = [(n, n) for n in root.nodes() if n.tag == "a" and n.has("product-name")]
+    else:
+        classes = {"product-item-h-wrap"} if key == "kaina24" else {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
+        entries = [(n.first("name" if key == "kaina24" else "product-title", "item_name", "product-name", "title"), n)
+                   for n in root.nodes() if any(n.has(cls) for cls in classes)]
+    for node, scope in entries:
+        if not node:
             continue
         if not any(token.startswith(compact(query)) for token in re.findall(r"[A-Z0-9]+", node.text().upper())):
             continue
-        try:
-            url = marketplace_url("hinnavaatlus", urljoin(page_url, node.attrs.get("href", "")))
-        except ValueError:
-            continue
-        if re.match(r"/\d+/", urlsplit(url).path):
+        url = None
+        for anchor in scope.nodes():
+            if anchor.tag != "a" or not anchor.attrs.get("href"):
+                continue
+            try:
+                target = marketplace_url(key, urljoin(page_url, anchor.attrs["href"]))
+            except ValueError:
+                continue
+            path = urlsplit(target).path
+            if ((key == "hinnavaatlus" and re.match(r"/\d+/", path)) or
+                    (key == "kaina24" and path.startswith("/p/")) or
+                    (key == "salidzini" and anchor in list(node.nodes()))):
+                url = target
+                break
+        # Search cards can point only to a retailer. Keep the marketplace search
+        # as the evidence link; never follow an outbound redirect for a candidate.
+        url = url or (marketplace_url(key, page_url) if key != "hinnavaatlus" else None)
+        signature = (node.text(), url)
+        if url and signature not in seen:
+            seen.add(signature)
             matches.append({"title": node.text()[:600], "url": url, "query": query})
     return matches[:20]
 
@@ -208,16 +230,21 @@ def parse_page(key, model, content, page_url):
             else:
                 rejected += 1
     # Kaina24/Salidzini expose seller rows in server HTML or in a rendered capture.
+    known_search_rows = False
     if key in {"kaina24", "salidzini"}:
         row_classes = {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
         for row in [n for n in nodes if any(n.has(cls) for cls in row_classes)]:
             name = row.first("product-title", "item_name", "product-name", "title")
             evidence = title if product_match else name.text() if name else ""
+            known_search_rows |= bool(evidence)
             seller = row.first("shop-name", "seller-name", "shop_name", "store-name", "item_shop_name")
             money = row.first("price", "item_price", "offer-price")
-            if exact_model(model, evidence) and seller and money:
-                offers.append({"store": seller.text(), "price_eur": price(money.text()), "title": evidence,
-                               "availability": availability(row.text())})
+            if matched_model(key, model, evidence):
+                if seller and money:
+                    offers.append({"store": seller.text(), "price_eur": price(money.text()), "title": evidence,
+                                   "availability": availability(row.text())})
+                else:
+                    rejected += 1
     # Explicit capture rows produced by the bundled v5 extension.
     for script in [n for n in nodes if n.tag == "script" and n.attrs.get("id") == "price-monitor-v5-offers"]:
         try:
@@ -257,8 +284,12 @@ def parse_page(key, model, content, page_url):
                 normalized.append(offer)
         except (ValueError, TypeError):
             rejected += 1
-    text = doc.text().lower()
-    empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|0 rezultāti|nekas netika atrasts", text))
+    text = " ".join(doc.text().lower().split())
+    empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|pagal įvestą paieškos frazę nieko neradome|0 rezultāti|nekas netika atrasts", text))
+    # Recognized result cards for other models allow a shorter query. Broken
+    # rows, unknown markup or incomplete pages must still go to manual review.
+    if not is_product and known_search_rows and not normalized and not links and not rejected:
+        empty = True
     if key == "hinnavaatlus" and urlsplit(page_url).path.rstrip("/") == "/search":
         known_results = title.lower().startswith("otsing:") and any(n.has("product-name") for n in nodes)
         empty |= known_results and not any(re.match(r"/\d+/", urlsplit(u).path) for u in links)

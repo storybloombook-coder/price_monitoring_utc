@@ -70,7 +70,7 @@ def test_hinna_known_alias_and_saved_page(model,alias,tmp_path):
         store.begin_run('two','deep');monitor.schedule(store.check('two',item['id'],'hinnavaatlus'));await asyncio.gather(*list(monitor.jobs.values()))
         assert len(requests)==4 and requests[-1]==url
         assert store.check('two',item['id'],'hinnavaatlus')['attempts']==1
-        assert not exact_model(model,alias)  # Still strict outside the Hinna allowlist.
+        assert not exact_model(model,alias)  # Exact matching stays strict; aliases are explicit.
     asyncio.run(scenario())
 
 

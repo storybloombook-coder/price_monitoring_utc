@@ -6,7 +6,7 @@ Comparison pages are authoritative; related-product cards are not offers.
 import re
 from urllib.parse import urljoin, urlsplit, urldefrag, parse_qs
 
-from .offers import compact, exact_model, normalize_offer, availability, price
+from .offers import compact, matched_model, normalize_offer, availability, price
 from .sources import marketplace_url
 
 
@@ -77,7 +77,7 @@ def parse_kaina(model, root, page_url):
     rows = [n for n in nodes if n.has("seller-item-table" if product else "product-item-h-wrap")]
     if not rows:
         return None
-    if product and not exact_model(model, title):
+    if product and not matched_model("kaina24", model, title):
         return dict(offers=[], links=[], not_found=False, rejected=0, title=title, partial=True)
 
     offers, links, rejected = [], [], 0
@@ -91,7 +91,7 @@ def parse_kaina(model, root, page_url):
             rejected += 1
             continue
         evidence = name.text()
-        if not exact_model(model, evidence):
+        if not matched_model("kaina24", model, evidence):
             continue
         target = page_url
         if not product:
@@ -117,7 +117,7 @@ def parse_kaina(model, root, page_url):
             continue
         # Search summaries may link to a complete comparison even with no seller
         # card. Never follow recommendations from an already matched product page.
-        if not product and exact_model(model, node.text() + " " + (node.attrs.get("title") or "")):
+        if not product and matched_model("kaina24", model, node.text() + " " + (node.attrs.get("title") or "")):
             compare = comparison_link(node.attrs["href"], page_url)
             if compare and compare not in links:
                 links.append(compare)
@@ -145,7 +145,7 @@ def parse_kaina(model, root, page_url):
     counts = [n for n in nodes if n.attrs.get("itemprop") == "offerCount"] if product else []
     expected = next((int(value) for n in counts if (value := n.attrs.get("content") or n.text()).strip().isdigit()), 0)
     partial = bool(rejected or (expected > len(offers) and not links))
-    return dict(offers=offers, links=links, not_found=False, rejected=rejected,
+    return dict(offers=offers, links=links, not_found=not product and not offers and not links and not rejected, rejected=rejected,
                 title=title, partial=partial,
                 expected_offer_count=expected,
                 coverage_url=urlsplit(page_url)._replace(query="", fragment="").geturl() if product else None,

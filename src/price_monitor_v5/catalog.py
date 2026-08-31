@@ -6,7 +6,7 @@ import sqlite3
 from openpyxl import load_workbook
 from price_monitor_v4.catalog import CatalogStore as BaseCatalog, canonicalize, number, utc_now, source_sheet_for_nomenclature
 from .sources import SOURCE_BY_KEY, search_url, marketplace_url, SHOPS, SOURCES
-from .offers import exact_model, compact, seller_key
+from .offers import exact_model, compact, seller_key, MODEL_ALIASES
 
 
 def infer_model(text):
@@ -188,7 +188,8 @@ class CatalogStore(BaseCatalog):
         for row in rows:
             task = json.loads(row[0])
             outdated_senukai = key == "kaina24" and (task.get("collection_revision") or 0) < 2 and any(seller_key(o.get("store"), key) == "senukai" for o in task.get("offers", []))
-            if not outdated_senukai and task.get("finished_at", "") >= threshold and task.get("status") == "SUCCESS" and task.get("coverage") == "complete" and task.get("collection_method") != "manual":
+            outdated_alias = key != "hinnavaatlus" and canonical in MODEL_ALIASES and (task.get("collection_revision") or 0) < 3
+            if not outdated_senukai and not outdated_alias and task.get("finished_at", "") >= threshold and task.get("status") == "SUCCESS" and task.get("coverage") == "complete" and task.get("collection_method") != "manual":
                 return task
         return None
 

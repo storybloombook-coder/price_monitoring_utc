@@ -32,13 +32,14 @@ const STATUS_HELP = {
 };
 STATUS_HELP['not-listed'] = 'The completed marketplace pages did not list this shop. This does not mean the shop has no stock.';
 STATUS_HELP.unverified = 'Not verified: one or more marketplace checks are pending, blocked, stopped or incomplete. This is NOT Not found; no conclusion about this shop is possible yet.';
+const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not found, search again with one, then two trailing characters removed (minimum 3 characters, letters and digits). Known S45HE/S45H and S55HE/S55H aliases are accepted; other candidates need review. CAPTCHA, network errors and unknown markup stop automatic fallback.';
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
   hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
   salidzini: 'Read seller offers from accessible Salidzini marketplace HTML or a browser capture. hCaptcha must be completed by you; the app does not bypass it. If reliable rows are unavailable, enter the seller, price and comparison link manually. Partial results require review and are not Not found. No retailer pages are opened.'
 };
 function parsingInfo(key, label = key) {
-  const help = PARSING_HELP[key];
+  const help = PARSING_HELP[key] ? PARSING_HELP[key] + SEARCH_FALLBACK_HELP : null;
   return help ? `<span class="parsing-info"><button type="button" class="info-button" aria-label="How ${escapeHtml(label)} parsing works" aria-describedby="parsing-${escapeHtml(key)}">i</button><span role="tooltip" id="parsing-${escapeHtml(key)}">${escapeHtml(help)}</span></span>` : '';
 }
 STATUS_HELP.cached = 'A recent marketplace observation was reused. Its original collection time is preserved.';

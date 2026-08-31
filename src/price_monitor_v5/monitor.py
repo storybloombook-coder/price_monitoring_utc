@@ -105,8 +105,8 @@ class MarketplaceMonitor:
                     self.store.save_check(task)
 
     async def collect(self, task, client, capture):
-        task.update(search_queries=[], candidate_matches=[], collection_revision=2)
-        queries = [None] + (shortened_queries(task["source_model"]) if task["marketplace_key"] == "hinnavaatlus" else [])
+        task.update(search_queries=[], candidate_matches=[], collection_revision=3)
+        queries = [None] + shortened_queries(task["source_model"])
         for query in queries:
             task["search_queries"].append(query or task["source_model"])
             await self.collect_once(task, client, capture, query)
@@ -123,6 +123,7 @@ class MarketplaceMonitor:
         seen = set()
         offers = []
         expected_counts = {}
+        authoritative_pages = set()
         partial, empty, fallback = False, False, False
         while queue and len(seen)<12:
             url = marketplace_url(key,queue.pop(0))
@@ -139,8 +140,8 @@ class MarketplaceMonitor:
                 else:
                     content, final = await self.fetch(client,key,url)
                 parsed = parse_page(key,model,content,final)
-                if query and not parsed["offers"] and key == "hinnavaatlus":
-                    for candidate in candidate_links(query, content, final):
+                if query and not parsed["offers"]:
+                    for candidate in candidate_links(query, content, final, key):
                         if not any(c["url"] == candidate["url"] for c in task["candidate_matches"]):
                             task["candidate_matches"].append(candidate)
             except httpx.HTTPStatusError as error:
@@ -154,7 +155,10 @@ class MarketplaceMonitor:
                 # Replace search-card snapshots for this comparison only. Do not
                 # double-count them or keep stale search prices beside live rows.
                 offers = [o for o in offers if o["url"] != parsed["authoritative_url"]]
-            offers.extend(parsed["offers"])
+                authoritative_pages.add(parsed["authoritative_url"])
+            # A later search page must not reintroduce stale snapshots for a
+            # comparison that has already been read in full.
+            offers.extend(o for o in parsed["offers"] if parsed.get("coverage_url") or o["url"] not in authoritative_pages)
             task["offers"] = list(offers)
             if parsed.get("coverage_url"):
                 group = parsed["coverage_url"]
@@ -163,7 +167,7 @@ class MarketplaceMonitor:
             else:
                 partial |= parsed["partial"]
             queue.extend(u for u in parsed["links"] if u not in seen and u not in queue)
-            if parsed["offers"] and final != discovery:
+            if parsed["offers"] and final != discovery and urlsplit(final).path.rstrip("/") != urlsplit(discovery).path.rstrip("/"):
                 # Persist the first comparison page, not its last pagination URL.
                 remembered = parsed.get("coverage_url") or final
                 task["product_url"] = remembered
