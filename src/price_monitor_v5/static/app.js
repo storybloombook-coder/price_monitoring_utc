@@ -626,13 +626,13 @@ function renderActionRequired(run) {
     const cooldown = false;
     const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : '';
     const retryAction = item.action_key === 'salidzini'
-      ? `${state.salidziniMode !== 'manual' ? `<button type="button" data-check-action="retry" ${attrs}>Retry automatic check</button>` : ''}<span class="muted">Auto needs the updated extension. For manual capture: Send to PriceMonitor → review → select “All pages and offers reviewed” to finish. Each marketplace is a separate check.</span>`
+      ? `${state.salidziniMode !== 'manual' ? `<button type="button" data-check-action="retry" ${attrs}>Retry automatic check</button>` : ''}<span class="muted">Open &amp; collect waits for CAPTCHA and saves verified results automatically. To select offers yourself: Open only → Send to PriceMonitor → review and save. Each marketplace is a separate check.</span>`
       : cooldown
       ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
       : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;
     const cooldownChoice = cooldown ? `<span class="action-cooldown-choice">Paused until ${escapeHtml(retryAt)}. Choose automatic waiting or enter a manual result now.</span>` : '';
     const candidates = item.candidate_matches?.length ? `<div class="candidate-matches"><strong>Possible variants — review before entering a price</strong>${item.candidate_matches.map(c => `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`).join('')}<span class="muted">These links are suggestions, not confirmed SKU matches.</span></div>` : '';
-    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}${candidates}</div></div><div class="action-item-actions">${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open verification</a>` : ''}${retryAction}
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}${candidates}</div></div><div class="action-item-actions"><button type="button" data-check-action="collect" ${attrs} title="Open the marketplace, complete CAPTCHA if needed, then collect automatically. Closes only after the full result is saved. Requires extension v5.0.9+.">Open &amp; collect</button>${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener" title="Open without automatic capture or closing">Open only</a>` : ''}${retryAction}
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" value="${escapeHtml(previousPrice)}" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
@@ -696,10 +696,13 @@ async function handleActionDialog(event) {
   }
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = action === 'retry' ? 'Capturing…' : action === 'wait' ? 'Scheduling…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
+  button.textContent = action === 'collect' ? 'Opening…' : action === 'retry' ? 'Capturing…' : action === 'wait' ? 'Scheduling…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
   try {
     const base = `/runs/${encodeURIComponent(state.currentRunId)}/${button.dataset.checkKind}/${button.dataset.itemId}/${encodeURIComponent(button.dataset.sourceKey)}`;
-    if (action === 'retry') {
+    if (action === 'collect') {
+      await api(`${base}/open-collect`, { method: 'POST' });
+      showBanner('success','Open & collect queued. Complete CAPTCHA if shown; the extension continues automatically and closes its tab only after the full result is saved.');
+    } else if (action === 'retry') {
       await api(`${base}/retry`, { method: 'POST' });
     } else if (action === 'wait') {
       await api(`${base}/wait`, { method: 'POST' });
@@ -712,7 +715,7 @@ async function handleActionDialog(event) {
     const message = action === 'retry' ? 'The selected check is capturing again.' : action === 'wait' ? 'The check will retry automatically when the cooldown ends.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
     const popover = button.closest('.action-popover'); if (popover) { popover.hidden = false; popover.classList.add('saved'); popover.innerHTML = `<span class="popover-success">${CHECK_ICON} ${escapeHtml(message)}</span>`; }
     await pollRun(state.currentRunId);
-    if (action === 'retry' || action === 'wait' || action === 'confirm-link') {
+    if (action === 'collect' || action === 'retry' || action === 'wait' || action === 'confirm-link') {
       scheduleRunPolling(state.currentRunId, 1000);
     }
   } catch (error) {

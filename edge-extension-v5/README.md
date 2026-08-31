@@ -1,4 +1,17 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.8
+# PriceMonitor v5 Marketplace Bridge · 5.0.9
+
+## Open & collect
+
+Reload the extension, refresh the app, then click **Open & collect** on an
+Action required check. A dedicated tab opens for any of the three marketplaces.
+Complete CAPTCHA yourself if shown; collection resumes without another click.
+All pages share this tab. Only a final backend receipt issued **after saving a
+complete result** allows closing it. Partial results, errors, Hard stop, a changed
+app address or a repurposed tab never authorize closing. Existing user tabs are
+not reused. Waiting survives a service-worker restart; restarting the app ends
+the pending session safely. Human verification is bounded at 10 minutes per
+page and the whole check at 15 minutes. Only one interactive check is allowed.
+**Open only** and the popup remain the explicit manual capture workflow.
 
 ## Salidzini Auto
 

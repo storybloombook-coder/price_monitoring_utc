@@ -83,9 +83,9 @@ def create_app(settings=None, store=None, transport=None):
             raise HTTPException(403,"Bundled extension only")
 
     @app.post("/browser-bridge/heartbeat")
-    async def heartbeat(request: Request, auto_salidzini: bool=False):
+    async def heartbeat(request: Request, auto_salidzini: bool=False, open_collect: bool=False):
         extension(request)
-        bridge.heartbeat(auto_salidzini)
+        bridge.heartbeat(auto_salidzini, open_collect)
         return bridge.status()
 
     @app.get("/browser-bridge/jobs/next")
@@ -106,13 +106,18 @@ def create_app(settings=None, store=None, transport=None):
             raise HTTPException(404,"Job already completed or stopped")
         return {"accepted":True}
 
+    @app.get('/browser-bridge/verifications/{token}')
+    async def verification_result(token: str, request: Request):
+        extension(request)
+        return bridge.verification(token)
+
     @app.websocket("/browser-bridge/ws")
     async def socket(ws: WebSocket):
         if ws.headers.get("origin") != EXTENSION_ORIGIN:
             await ws.close(code=1008)
             return
         await ws.accept()
-        bridge.heartbeat(ws.query_params.get('auto_salidzini') == '1')
+        bridge.heartbeat(ws.query_params.get('auto_salidzini') == '1', ws.query_params.get('open_collect') == '1')
         bridge.websocket_connected()
         receiver = asyncio.create_task(ws.receive_json())
         sender = asyncio.create_task(bridge.next_job(25))
@@ -288,6 +293,12 @@ def create_app(settings=None, store=None, transport=None):
     async def retry(run_id: str,item_id: int,key: str):
         await monitor.retry(run_id,item_id,key,capture=bridge.connected)
         return {"status":"PENDING"}
+
+    @app.post('/runs/{run_id}/marketplaces/{item_id}/{key}/open-collect')
+    async def open_collect(run_id: str, item_id: int, key: str):
+        async with start_lock:
+            token = await monitor.retry(run_id,item_id,key,open_collect=True)
+        return {'status':'PENDING', 'verification_id':token}
 
     @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/link")
     async def link(run_id: str,item_id: int,key: str,payload: dict=Body(...)):

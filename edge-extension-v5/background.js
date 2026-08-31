@@ -70,7 +70,7 @@ async function liveChannelConnected() {
 }
 
 async function heartbeat() {
-  const response = await bridgeFetch('/browser-bridge/heartbeat?auto_salidzini=true', { method: 'POST' });
+  const response = await bridgeFetch('/browser-bridge/heartbeat?auto_salidzini=true&open_collect=true', { method: 'POST' });
   if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
   return response.json();
 }
@@ -78,17 +78,25 @@ async function heartbeat() {
 function extractRenderedPage(model) {
   const text = document.body?.innerText || '';
   const securityChallenge = /verify you are human|just a moment|checking your browser/i.test(text) ||
-    Boolean(document.querySelector('#challenge-running, #challenge-stage, .h-captcha iframe, iframe[src*="hcaptcha.com"][title*="challenge"]'));
+    [...document.querySelectorAll('#challenge-running, #challenge-stage, .h-captcha iframe, iframe[src*="hcaptcha.com"][title*="challenge"]')]
+      .some(node=>{const box=node.getBoundingClientRect(),style=getComputedStyle(node);return box.width>0 && box.height>0 && style.display!=='none' && style.visibility!=='hidden';});
   const clone = document.documentElement.cloneNode(true);
   clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript, input, textarea, select, iframe').forEach(node => node.remove());
   const html = clone.outerHTML;
   const cards = [...document.querySelectorAll('.item_box_main')];
   const empty = /\b0\s+preces?\b|nekas netika atrasts/i.test(text);
   const fingerprint = cards.map(n => n.innerText).join('|');
+  const resultNodes=[...document.querySelectorAll('.product-item-h-wrap, .seller-item-table, tr.offer, .product-name')];
+  // Ads/clocks outside the offer list must not prevent stable result detection.
+  const resultText=resultNodes.length ? (document.querySelector('h1')?.innerText||'')+'|'+resultNodes.map(n=>n.innerText).join('|') : text;
+  let textHash=2166136261;
+  for(let i=0;i<resultText.length;i++) textHash=Math.imul(textHash^resultText.charCodeAt(i),16777619);
   return { url: location.href, title: document.title, html: html.slice(0, 7900000),
     security_challenge: securityChallenge, incomplete: html.length > 7900000,
     salidzini_ready: document.readyState === 'complete' && (cards.length > 0 || empty),
-    salidzini_fingerprint: fingerprint || (empty ? 'empty' : '') };
+    salidzini_fingerprint: fingerprint || (empty ? 'empty' : ''),
+    page_ready:document.readyState==='complete' && text.trim().length>50,
+    page_fingerprint:String(textHash>>>0) };
 }
 
 async function snapshot(tabId, model) {
@@ -123,7 +131,7 @@ async function finishJobNow(jobId, record, captured, closeTab) {
   await chrome.alarms.clear(`${JOB_ALARM_PREFIX}${jobId}`);
   await submit(jobId, captured);
   await removeActiveJob(jobId);
-  if (record.ruleId) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [record.ruleId]});
+  if (record.ruleId && !record.interactive) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [record.ruleId]});
   if (closeTab) await chrome.tabs.remove(record.tabId).catch(() => {});
   await setStatus(captured.security_challenge ? 'attention' : 'connected', captured.security_challenge
     ? `Complete or inspect ${record.job.shop_key} in the open tab`
@@ -137,6 +145,7 @@ async function inspectJob(jobId) {
   try {
     const record = (await activeJobs())[jobId];
     if (!record) return;
+    if (record.interactive) { await inspectVerification(jobId,record); return; }
     if (record.automatic) { await inspectAutomaticSalidzini(jobId,record); return; }
     const expired = Date.now() - record.startedAt >= JOB_TIMEOUT_MS;
     let captured;
@@ -183,6 +192,7 @@ async function acceptJobNow(job) {
   const domain = domains[job.shop_key];
   const url = new URL(job.url);
   if (!domain || url.protocol !== 'https:' || ![domain, `www.${domain}`].includes(url.hostname) || url.username || url.password || (url.port && url.port !== '443')) throw new Error('Only marketplace comparison pages are allowed');
+  if (job.verification_id) { await acceptVerification(job); return; }
   if (job.shop_key === 'salidzini') {
     if (job.automatic) { await acceptAutomaticSalidzini(job); return; }
     const tabs = await chrome.tabs.query({ url: ['https://salidzini.lv/*', 'https://www.salidzini.lv/*'] });
@@ -234,6 +244,7 @@ async function pollLoop() {
 
 async function resumeJobs() {
   await heartbeat();
+  await resumeVerifications();
   for (const jobId of Object.keys(await activeJobs())) void inspectJob(jobId);
 }
 
@@ -310,5 +321,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 void chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
 importScripts('page-capture.js');
 importScripts('salidzini-auto.js');
+importScripts('open-collect.js');
 void configureLiveChannel();
 void resumeJobs().catch(error => setStatus('reconnecting', String(error)));

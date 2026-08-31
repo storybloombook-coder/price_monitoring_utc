@@ -28,6 +28,7 @@ class CaptureJob:
     created_at: float
     future: asyncio.Future[dict[str, Any]]
     automatic: bool = False
+    verification_id: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class CaptureJob:
             "model": self.model,
             "url": self.url,
             "automatic": self.automatic,
+            "verification_id": self.verification_id,
         }
 
 
@@ -51,6 +53,8 @@ class BrowserBridge:
         self._websocket_connections = 0
         self._capture_lock = asyncio.Lock()
         self.automatic_salidzini = False
+        self.open_collect = False
+        self._verifications = {}
 
     @property
     def connected(self) -> bool:
@@ -58,10 +62,29 @@ class BrowserBridge:
             self._last_seen > 0 and time.monotonic() - self._last_seen <= self.connected_window_seconds
         )
 
-    def heartbeat(self, automatic_salidzini=None) -> None:
+    def heartbeat(self, automatic_salidzini=None, open_collect=None) -> None:
         self._last_seen = time.monotonic()
         if automatic_salidzini is not None:
             self.automatic_salidzini = automatic_salidzini is True
+        if open_collect is not None:
+            self.open_collect = open_collect is True
+
+    def begin_verification(self) -> str:
+        now = time.monotonic()
+        self._verifications = {k:v for k,v in self._verifications.items() if now-v['created_at'] < 3600}
+        if len(self._verifications) >= 512:
+            raise ValueError('Too many verification sessions; retry later')
+        token = str(uuid.uuid4())
+        self._verifications[token] = {'id':token, 'state':'pending', 'created_at':now}
+        return token
+
+    def verification(self, token):
+        return dict(self._verifications[token])
+
+    def finish_verification(self, token, state, **details):
+        record = self._verifications.get(token)
+        if record and record['state'] == 'pending':
+            record.update(state=state, **details)
 
     def websocket_connected(self) -> None:
         self._websocket_connections += 1
@@ -80,9 +103,10 @@ class BrowserBridge:
             "jobs": [job.public() for job in self._jobs.values()],
             "extension_id": EXTENSION_ID,
             "automatic_salidzini": self.automatic_salidzini,
+            "open_collect": self.open_collect,
         }
 
-    async def capture(self, shop_key: str, model: str, url: str, *, automatic=False) -> dict[str, Any]:
+    async def capture(self, shop_key: str, model: str, url: str, *, automatic=False, verification_id=None) -> dict[str, Any]:
         async with self._capture_lock:
             if not self.connected:
                 raise BrowserBridgeUnavailable("The PriceMonitor Edge extension is not connected")
@@ -95,15 +119,18 @@ class BrowserBridge:
                 created_at=time.monotonic(),
                 future=loop.create_future(),
                 automatic=automatic,
+                verification_id=verification_id,
             )
             self._jobs[job.id] = job
             self._queue.put_nowait(job.id)
             try:
-                return await asyncio.wait_for(asyncio.shield(job.future), timeout=self.timeout_seconds)
+                return await asyncio.wait_for(asyncio.shield(job.future), timeout=620 if verification_id else self.timeout_seconds)
             except TimeoutError as error:
                 raise BrowserBridgeTimeout("The Edge extension did not finish browser verification in time") from error
             finally:
                 self._jobs.pop(job.id, None)
+                if not job.future.done():
+                    job.future.cancel()
 
     async def next_job(self, wait_seconds: float = 25) -> dict[str, Any] | None:
         self.heartbeat()

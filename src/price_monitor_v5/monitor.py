@@ -22,6 +22,7 @@ class MarketplaceMonitor:
         self.last_request = {}
         self.cooldowns = store.get_meta("v5_cooldowns", {})
         self.browser_pauses = {}
+        self.verification_jobs = {}
 
     def launch(self, run_id):
         for task in self.store.checks(run_id):
@@ -74,11 +75,14 @@ class MarketplaceMonitor:
         ident = (task["run_id"], task["item_id"], task["marketplace_key"])
         key, model = task["marketplace_key"], task["source_model"]
         automatic = key == 'salidzini' and task.get('salidzini_mode') == 'auto'
+        verification = self.verification_jobs.get(ident)
         try:
             async with self.locks[key]:
-                if key == 'salidzini' and task.get('salidzini_mode') == 'manual':
-                    raise ReviewRequired('Manual mode: open Salidzini, then Send to PriceMonitor, review and save. No automatic requests are sent.')
-                if automatic:
+                if verification:
+                    capture = True
+                if not verification and key == 'salidzini' and task.get('salidzini_mode') == 'manual':
+                    raise ReviewRequired('Manual mode: no background requests. Choose Open & collect for a one-click check, or Open only → Send to PriceMonitor to review offers yourself.')
+                if automatic and not verification:
                     if self.browser_pauses.get(task['run_id']):
                         raise ReviewRequired(self.browser_pauses[task['run_id']])
                     if not self.bridge.connected or not getattr(self.bridge, 'automatic_salidzini', False):
@@ -89,7 +93,7 @@ class MarketplaceMonitor:
                 task.update(status="RUNNING",error=None,error_code=None,offers=[],cached=False,attempts=0)
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
-                async with asyncio.timeout(180 if automatic else 90 if capture else 65):
+                async with asyncio.timeout(900 if verification else 180 if automatic else 90 if capture else 65):
                     # Preserve the working legacy Kaina request profile. One fixed
                     # profile, no header rotation or retries after protection.
                     headers = ({"User-Agent": "PriceMonitor/0.1 (local price monitoring)", "Accept": "*/*"}
@@ -105,7 +109,7 @@ class MarketplaceMonitor:
                         error="Network connection failed before the marketplace could be read. Check Internet/firewall/proxy access and restart PriceMonitor from its folder. This is not a CAPTCHA or a missing product.")
         except Exception as error:
             task.update(status="ACTION_REQUIRED", coverage="partial", error=str(error) or "Check timed out; use manual review")
-            if automatic:
+            if automatic and not verification:
                 self.browser_pauses.setdefault(task['run_id'], 'Salidzini Auto paused after a browser/collection error. Inspect the page, then Retry automatic check; manual capture remains available.')
             if self.blocked(key) and not automatic:
                 task["retry_after"] = self.cooldowns[key]
@@ -114,7 +118,18 @@ class MarketplaceMonitor:
                 self.jobs.pop(ident, None)
                 if not asyncio.current_task().cancelling():
                     task["finished_at"] = utc_now()
-                    self.store.save_check(task)
+                    try:
+                        self.store.save_check(task)
+                    except Exception:
+                        if verification:
+                            self.bridge.finish_verification(verification, 'review', error='Could not save the result; keep the page open')
+                        raise
+                    finally:
+                        self.verification_jobs.pop(ident, None)
+                    if verification:
+                        complete = task.get('coverage') == 'complete' and task['status'] in {'SUCCESS','NOT_FOUND'}
+                        self.bridge.finish_verification(verification, 'complete' if complete else 'review',
+                                                        status=task['status'], error=task.get('error'))
 
     async def collect(self, task, client, capture):
         task.update(search_queries=[], candidate_matches=[], collection_revision=4)
@@ -130,7 +145,7 @@ class MarketplaceMonitor:
     async def collect_once(self, task, client, capture, query=None):
         key, model = task["marketplace_key"], task["source_model"]
         saved = task.get("product_url") if query is None else None
-        if saved and key == 'salidzini' and task.get('salidzini_mode') == 'auto':
+        if saved and key == 'salidzini' and (task.get('salidzini_mode') == 'auto' or task.get('verification_id')):
             # A manually saved page 2 must not make Auto skip page 1.
             parts = urlsplit(marketplace_url(key, saved))
             saved = parts._replace(query=urlencode([(k,v) for k,v in parse_qsl(parts.query, keep_blank_values=True)
@@ -151,22 +166,31 @@ class MarketplaceMonitor:
             try:
                 if capture:
                     automatic = key == 'salidzini' and task.get('salidzini_mode') == 'auto'
-                    if automatic:
-                        wait = self.delay - (time.monotonic() - self.last_request.get('salidzini-browser', 0))
+                    verification = task.get('verification_id')
+                    if automatic or verification:
+                        pace_key = key + '-browser'
+                        wait = self.delay - (time.monotonic() - self.last_request.get(pace_key, 0))
                         if wait > 0:
                             await asyncio.sleep(wait)
-                        self.last_request['salidzini-browser'] = time.monotonic()
-                        result = await self.bridge.capture(key,model,url,automatic=True)
+                        self.last_request[pace_key] = time.monotonic()
+                        if verification:
+                            result = await self.bridge.capture(key,model,url,verification_id=verification)
+                        else:
+                            result = await self.bridge.capture(key,model,url,automatic=True)
                     else:
                         result = await self.bridge.capture(key,model,url)
                     if result.get("security_challenge") or result.get("error"):
-                        if automatic:
+                        if automatic and not verification:
                             self.browser_pauses[task['run_id']] = ('Salidzini browser queue paused: ' +
                                 (result.get('error') or 'CAPTCHA detected') + '. Resolve the open page, then Retry automatic check; or use manual capture.')
                         raise ReviewRequired(result.get("error") or "Complete the marketplace CAPTCHA before capturing")
                     content, final = result.get("html", ""), marketplace_url(key,result.get("url") or url)
-                    if automatic and not same_salidzini_search(final, url):
+                    if (automatic or verification and key == 'salidzini') and not same_salidzini_search(final, url):
                         raise ReviewRequired('The browser page changed. Check the SKU/search URL and retry')
+                    if verification and key != 'salidzini':
+                        expected, actual = urlsplit(url), urlsplit(final)
+                        if expected.path.rstrip('/') != actual.path.rstrip('/') or sorted(parse_qsl(expected.query)) != sorted(parse_qsl(actual.query)):
+                            raise ReviewRequired('The verification page changed. Check the SKU/search URL and retry')
                     partial |= bool(result.get("incomplete"))
                 else:
                     content, final = await self.fetch(client,key,url)
@@ -239,6 +263,9 @@ class MarketplaceMonitor:
             raise ReviewRequired("No reliable seller offers extracted. Open this marketplace, capture the comparison page or add the offers manually.")
 
     async def cancel_pair(self, run_id, item_id, key):
+        verification = self.verification_jobs.pop((run_id,item_id,key),None)
+        if verification:
+            self.bridge.finish_verification(verification, 'cancelled')
         job = self.jobs.pop((run_id,item_id,key),None)
         if job:
             job.cancel()
@@ -257,14 +284,22 @@ class MarketplaceMonitor:
         for ident in list(self.jobs):
             await self.cancel_pair(*ident)
 
-    async def retry(self, run_id, item_id, key, *, url=None, capture=True):
+    async def retry(self, run_id, item_id, key, *, url=None, capture=True, open_collect=False):
         task = self.store.check(run_id,item_id,key)
         session = self.store.monitoring_session(run_id)
         if session.get("cleared_at"):
             raise ValueError("Start a new monitoring run after clearing the table")
         if not any(s["key"]==key and s["effective_enabled"] for s in self.store.list_sources()):
             raise ValueError("This marketplace is disabled")
+        if open_collect and (not self.bridge.connected or not self.bridge.open_collect):
+            raise ValueError('Open & collect needs the connected v5.0.9+ extension. Reload it on the browser extensions page. Open only and manual entry remain available.')
+        if open_collect and any(ident != (run_id,item_id,key) for ident in self.verification_jobs):
+            raise ValueError('Another Open & collect check is active. Finish it or use Hard stop before opening the next one.')
         await self.cancel_pair(run_id,item_id,key)
+        task.pop('verification_id',None)
+        if open_collect:
+            task['verification_id'] = self.bridge.begin_verification()
+            self.verification_jobs[(run_id,item_id,key)] = task['verification_id']
         if key == 'salidzini':
             task['salidzini_mode'] = self.store.salidzini_mode()
             self.browser_pauses.pop(run_id, None)
@@ -272,8 +307,15 @@ class MarketplaceMonitor:
             task["product_url"] = marketplace_url(key,url)
             self.store.remember_source_link(item_id,key,url)
         task.update(status="PENDING",error=None,cached=False)
-        self.store.save_check(task)
+        try:
+            self.store.save_check(task)
+        except Exception:
+            token = self.verification_jobs.pop((run_id,item_id,key),None)
+            if token:
+                self.bridge.finish_verification(token,'review',error='Could not start verification; database write failed')
+            raise
         self.schedule(task,capture)
+        return task.get('verification_id')
 
     async def resolve(self, run_id, item_id, key, payload):
         task = self.store.check(run_id,item_id,key)

@@ -11,7 +11,7 @@ function websocketUrl(value) {
   const url = new URL(value);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = '/browser-bridge/ws';
-  url.search = '?auto_salidzini=1';
+  url.search = '?auto_salidzini=1&open_collect=1';
   url.hash = '';
   return url.toString();
 }
