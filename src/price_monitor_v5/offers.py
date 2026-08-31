@@ -142,6 +142,11 @@ def normalize_offer(key, model, raw, page_url, *, manual=False):
 def parse_page(key, model, content, page_url):
     marketplace_url(key, page_url)
     doc = Document(content).root
+    if key == "kaina24":
+        from .kaina24 import parse_kaina
+        parsed = parse_kaina(model, doc, page_url)
+        if parsed is not None:
+            return parsed
     nodes = list(doc.nodes())
     title = next((n.text() for n in nodes if n.tag == "h1"), "")
     is_product = (key == "hinnavaatlus" and bool(re.match(r"/\d+/", urlsplit(page_url).path))) or (key == "kaina24" and "/p/" in page_url)

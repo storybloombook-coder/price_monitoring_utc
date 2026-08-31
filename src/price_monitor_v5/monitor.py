@@ -2,7 +2,7 @@ import asyncio
 import time
 import json
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 import httpx
 from .catalog import utc_now
 from .sources import marketplace_url, search_url, MARKETPLACES
@@ -61,7 +61,7 @@ class MarketplaceMonitor:
                     body.extend(chunk)
                     if len(body)>8_000_000:
                         raise ReviewRequired("Marketplace page is too large; review it manually")
-                content = body.decode(response.encoding or "utf-8",errors="replace")
+                content = body.decode("utf-8" if key == "kaina24" else response.encoding or "utf-8",errors="replace")
             lowered = content.lower()
             if any(marker in lowered for marker in ("cf-chl-", "challenge-platform", 'class="h-captcha"', "verify you are human", "just a moment...")):
                 self.protect(key)
@@ -80,8 +80,13 @@ class MarketplaceMonitor:
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
                 async with asyncio.timeout(90 if capture else 65):
+                    # Preserve the working legacy Kaina request profile. One fixed
+                    # profile, no header rotation or retries after protection.
+                    headers = ({"User-Agent": "PriceMonitor/0.1 (local price monitoring)", "Accept": "*/*"}
+                               if key == "kaina24" else
+                               {"User-Agent": "PriceMonitor/5.0 (personal price comparison)", "Accept": "text/html"})
                     async with httpx.AsyncClient(timeout=18, follow_redirects=False, transport=self.transport,
-                            headers={"User-Agent":"PriceMonitor/5.0 (personal price comparison)", "Accept":"text/html"}) as client:
+                            headers=headers) as client:
                         await self.collect(task, client, capture)
         except asyncio.CancelledError:
             return
@@ -106,6 +111,7 @@ class MarketplaceMonitor:
         queue = [saved or discovery]
         seen = set()
         offers = []
+        expected_counts = {}
         partial, empty, fallback = False, False, False
         while queue and len(seen)<12:
             url = marketplace_url(key,queue.pop(0))
@@ -129,14 +135,25 @@ class MarketplaceMonitor:
                     continue
                 raise
             empty |= parsed["not_found"]
+            if parsed.get("authoritative_url"):
+                # Replace search-card snapshots for this comparison only. Do not
+                # double-count them or keep stale search prices beside live rows.
+                offers = [o for o in offers if o["url"] != parsed["authoritative_url"]]
             offers.extend(parsed["offers"])
             task["offers"] = list(offers)
-            partial |= parsed["partial"]
+            if parsed.get("coverage_url"):
+                group = parsed["coverage_url"]
+                expected_counts[group] = max(expected_counts.get(group, 0), parsed.get("expected_offer_count", 0))
+                partial |= bool(parsed["rejected"])
+            else:
+                partial |= parsed["partial"]
             queue.extend(u for u in parsed["links"] if u not in seen and u not in queue)
             if parsed["offers"] and final != discovery:
-                task["product_url"] = final
+                # Persist the first comparison page, not its last pagination URL.
+                remembered = parsed.get("coverage_url") or final
+                task["product_url"] = remembered
                 try:
-                    self.store.remember_source_link(task["item_id"],key,final)
+                    self.store.remember_source_link(task["item_id"],key,remembered)
                 except KeyError:
                     pass  # The catalog item may have been deleted during this run.
             if url == saved and not parsed["offers"] and not parsed["links"] and discovery not in seen:
@@ -145,6 +162,12 @@ class MarketplaceMonitor:
             if not parsed["offers"] and not parsed["links"] and not parsed["not_found"] and url != saved:
                 partial = True
         unique = {(o["store"].lower(),o["price_eur"],o["availability"],o["url"]):o for o in offers}
+        for group, expected in expected_counts.items():
+            # Count across pagination, not each page in isolation. Missing rows
+            # remain partial even if the final page omits the aggregate count.
+            captured = {(o["store"].lower(), o["price_eur"], o["availability"])
+                        for o in unique.values() if urlsplit(o["url"])._replace(query="", fragment="").geturl() == group}
+            partial |= len(captured) < expected
         task.update(offers=list(unique.values()),collection_method="extension" if capture else "marketplace HTML",attempts=len(seen),
                     coverage="partial" if partial or queue else "complete", retry_after=None)
         if offers:

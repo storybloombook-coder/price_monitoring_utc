@@ -70,6 +70,16 @@ session; use the Russian guide for installation and initial verification.
 - All 80 automated tests passed: case/whitespace aliases, rejected similar/foreign-country names, 32S4K seller-card parsing, preserved unknown availability, old results and cached runs, exact price/time preservation, unchanged stored record, numeric Smartech Excel cell.
 - No Kaina24 collection changes are part of this patch. Its previously diagnosed adapter regression remains a separate issue.
 
+## Patch 5.0.3 — working Kaina24 adapter
+
+- Compared the old bundled adapter and successful v4 task records with current HTML. Restored its fixed User-Agent/Accept request profile and explicit UTF-8 decoding, keeping the v5 async queue, 3-second pacing, bounded responses, cancellation and protection cooldown. No header rotation, CAPTCHA solving, retailer calls or legacy EXE launches.
+- Added dedicated search-card and comparison-table parsing. Seller evidence comes from logo labels; prices only from cash-price nodes. Comparison rows replace search snapshots, featured/mobile duplicates are removed, and the collapsed sold-out archive and related models are excluded. Per-row schema availability is read without borrowing aggregate stock or guessing from delivery time. Explicit ordinary prices replace loyalty prices; ambiguous conditional offers require review.
+- Kaina `/ex/` tracking links are rejected before requesting them. Output links and saved model links stay on Kaina24 comparison pages. A missing saved page falls back to search. Pagination retains the first comparison link and checks advertised offer counts across pages.
+- 103 automated tests passed, including 23 new Kaina regressions: real-structure seller cards/tables, exact matching, financing/delivery separation, country mapping, featured/archive exclusions, per-row stock, loyalty pricing, safe URLs, UTF-8/request headers, search reconciliation, saved-link reuse/404 fallback, protection retaining partial prices and pagination coverage. Existing v4/v5 tests remain unchanged and passing.
+- Live final portable EXE, port 8153, isolated catalog, extension disconnected: **24G54 SUCCESS, 6 offers, 104.40–133.35 EUR**; **32S4K SUCCESS, 17 offers, 153.79–299.99 EUR**. Both used two requests (search + Kaina comparison), complete coverage against the declared count. Bite 104.40 and Varle 108.27 populated the 24G54 shop cells; Varle 158.90 and Smartech.ee 153.79 populated 32S4K. Rde.lt remains separate from the configured RDE.ee. Prices are observations on 2026-08-31, not fixed expectations for future runs.
+- Frozen EXE file/product versions, health endpoint and page header report 5.0.3. Production catalog SHA256 before/after asset replacement was identical: `C7B86589DE7A5777723BEF5A3282D3C480917337141B1A404A7666ABB7BDB8A9`. A backup was saved under `build/recovery-503-7e7eb16a34874b689b367b585cd7cb37/`. Only v5 program assets were replaced; v4 was not stopped or modified. No ZIP generated.
+- Kaina24 is working in the tested ordinary network session, not guaranteed against future protection or markup changes. Salidzini and Hinnavaatlus collection were not changed. Installed-extension capture was not exercised in this patch; it uses the same server-side HTML parser.
+
 ## Rollback
 
 The v4 source package and portable folder are unchanged. Git tag `v4.2.4` points to

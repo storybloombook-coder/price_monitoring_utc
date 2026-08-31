@@ -23,7 +23,7 @@ def marketplace_url(key: str, url: str) -> str:
     if (not source or source.kind != "marketplace" or parsed.scheme != "https"
             or parsed.hostname not in {domain, "www." + domain} or parsed.port not in (None, 443)
             or parsed.username or parsed.password
-            or re.search(r"(?:^|/)(?:out|go|click|redirect|redirector|shop|poodi|offer)(?:[/.]|$)", path)
+            or re.search(r"(?:^|/)(?:ex|out|go|click|redirect|redirector|shop|poodi|offer)(?:[/.]|$)", path)
             or re.search(r"(?:^|&)(?:url|redirect|target|to)=", parsed.query, re.I)):
         raise ValueError("Use an HTTPS comparison/search page on the selected marketplace, not a retailer or redirect link")
     return value
