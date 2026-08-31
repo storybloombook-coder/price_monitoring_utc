@@ -1,4 +1,15 @@
-# Price Monitor 4.2.4
+# Price Monitor 5.0.0
+
+Marketplace-only monitoring via Kaina24, Salidzini and Hinnavaatlus. Retailer
+columns are derived from marketplace seller offers, never direct retailer requests.
+
+Run `build-v5.ps1`, then `dist/PriceMonitor-v5.0.0-windows-x64-portable/PriceMonitor.exe`
+(port 8050). See [the Russian v5 guide](README-v5-RU.md).
+
+v4 source and portable folder remain intact; rollback tag: `v4.2.4`.
+
+## Preserved v4 documentation
+
 
 Local-first Windows application for TCL marketplace and direct-shop price monitoring. Version 4 adds an editable catalog, per-source controls, compact model-level results, and direct retailer checks while preserving Excel import and local SQLite history.
 

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PriceMonitor Bridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header><span class="mark">PM</span><div><strong>PriceMonitor v5 Bridge</strong><small>Marketplace extension · v5.0.0</small></div></header>
+  <section id="status" class="status">Checking connection…</section>
+  <label>PriceMonitor address<input id="app-url" type="url" value="http://127.0.0.1:8050"></label>
+  <label class="check"><input id="close-tabs" type="checkbox" checked> Close successfully captured tabs</label>
+  <button id="save" type="button">Save and connect</button>
+  <p>The extension opens a visible retailer tab only when direct monitoring is blocked. Complete any security check in that tab.</p>
+  <script src="popup.js"></script>
+</body>
+</html>
