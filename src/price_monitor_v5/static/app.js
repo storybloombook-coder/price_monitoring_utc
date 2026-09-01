@@ -1,4 +1,6 @@
 const byId = id => document.getElementById(id);
+const uiText = value => window.pmI18n?.t(String(value ?? '')) ?? String(value ?? '');
+const uiLocale = () => window.pmI18n?.locale || 'en-GB';
 const HIDDEN_COLUMNS_KEY = 'price-monitor-v5.hidden-columns';
 const RUN_MODE_KEY = 'price-monitor-v5.run-mode';
 const RUN_MODE_HELP = {
@@ -62,7 +64,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, options);
   const contentType = response.headers.get('content-type') || '';
   const data = contentType.includes('json') ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(data?.detail || data || `Request failed (${response.status})`);
+  if (!response.ok) throw new Error(uiText(data?.detail || data || `Request failed (${response.status})`));
   return data;
 }
 
@@ -72,7 +74,7 @@ function showBanner(kind, message) {
   error.hidden = true; success.hidden = true;
   if (!message) return;
   const target = kind === 'error' ? error : success;
-  target.textContent = message; target.hidden = false;
+  target.textContent = uiText(message); target.hidden = false;
   window.setTimeout(() => { target.hidden = true; }, 5000);
 }
 
@@ -94,7 +96,7 @@ async function copyModel(button) {
     }
     const original = button.innerHTML; button.classList.add('copied'); button.innerHTML = CHECK_ICON;
     window.setTimeout(() => { button.classList.remove('copied'); button.innerHTML = original; }, 1600);
-  } catch (error) { showBanner('error', `Could not copy the model: ${error.message}`); }
+  } catch (error) { showBanner('error', uiText(`Could not copy the model: ${error.message}`)); }
 }
 
 function badge(label, type, help = STATUS_HELP[type]) {
@@ -113,6 +115,11 @@ function updateRunModeHelp() {
   localStorage.setItem(RUN_MODE_KEY, mode);
   byId('run-mode-help').textContent = RUN_MODE_HELP[mode] || RUN_MODE_HELP.balanced;
   byId('cache-summary').textContent = mode === 'deep' ? '· fresh checks' : `· cache up to ${mode === 'quick' ? 12 : 4} hours`;
+}
+
+function updateFileName(input) {
+  const target = byId(`${input.id}-name`);
+  if (target) target.textContent = input.files?.[0]?.name || 'No file selected';
 }
 
 function itemStatus(item) {
@@ -143,7 +150,7 @@ function renderStock() {
   const items = filteredCatalog('stock');
   byId('stock-rows').innerHTML = items.length ? items.map(item => `<tr class="${item.matched ? 'stock-row-monitored' : ''}"><td><div class="stock-position">${item.state === 'trash' ? '' : item.matched ? '<span class="monitor-linked" title="In monitoring" aria-label="In monitoring">✓</span>' : `<button class="monitor-arrow" data-action="monitor" data-id="${item.id}" title="Add to monitoring" aria-label="Add ${escapeHtml(item.model || item.nomenclature)} to monitoring">←</button>`}<span><span class="item-primary">${escapeHtml(item.nomenclature)}</span>
     <span class="item-secondary">${escapeHtml(item.model || 'No linked model')} · ${escapeHtml(item.warehouse || 'No warehouse')}</span></span></div></td>
-    <td>${Number(item.quantity || 0).toLocaleString('en-US')} units<span class="item-secondary">${Number(item.unit_cost_eur || 0).toFixed(2)} EUR</span></td>
+    <td>${Number(item.quantity || 0).toLocaleString(uiLocale())} units<span class="item-secondary">${Number(item.unit_cost_eur || 0).toFixed(2)} EUR</span></td>
     <td>${itemStatus(item)} ${item.state !== 'trash' && item.matched ? badge('In monitoring', 'monitoring') : item.state !== 'trash' ? badge('Unmatched', 'unmatched') : ''}</td><td>${actionButtons(item)}</td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No positions found.</td></tr>';
 }
@@ -336,7 +343,7 @@ async function handleItemAction(event) {
     if (button.dataset.action === 'trash') await api(`/catalog/items/${item.id}`, { method: 'DELETE' });
     if (button.dataset.action === 'restore') await api(`/catalog/items/${item.id}/restore`, { method: 'POST' });
     if (button.dataset.action === 'delete-permanently') {
-      if (!window.confirm('Delete this position permanently? This cannot be undone.')) return;
+      if (!window.confirm(uiText('Delete this position permanently? This cannot be undone.'))) return;
       await api(`/catalog/items/${item.id}/permanent`, { method: 'DELETE' });
       showBanner('success', 'Position deleted permanently.');
     }
@@ -367,7 +374,7 @@ async function loadSetupStatus() {
 function euro(value) { return value == null ? '—' : `${Number(value).toFixed(2)} EUR`; }
 function manualDecisionText(decision) {
   if (!decision) return '';
-  const when = decision.decided_at ? new Date(decision.decided_at).toLocaleString('en-GB') : 'time unavailable';
+  const when = decision.decided_at ? new Date(decision.decided_at).toLocaleString(uiLocale()) : uiText('time unavailable');
   if (decision.status === 'NOT_FOUND') return `Not found · decided ${when}`;
   const seller = decision.seller_name ? ` · ${decision.seller_name}` : '';
   return `${euro(decision.price_eur)} · ${(decision.availability || 'IN_STOCK').replaceAll('_', ' ')}${seller} · decided ${when}`;
@@ -515,7 +522,7 @@ function marketplaceCell(row, openDetails, maximum = false) {
     const source = marketplaceSourceForTask(task);
     const offers = (task.offers || []).map((offer, index) => `<div class="v5-offer">${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="offer-controls"><button type="button" class="link-action" data-correct-kind="marketplaces" data-correct-item="${task.item_id}" data-correct-source="${escapeHtml(task.marketplace_key)}" data-offer-index="${index}">Edit offer</button><button type="button" class="link-action danger" data-remove-offer="${index}" data-item="${task.item_id}" data-key="${escapeHtml(task.marketplace_key)}">Remove false match</button></span></div>`).join('');
     const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured in-stock offers only';
-    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString('en-GB')) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
+    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString(uiLocale())) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
   }).join('');
   return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
 }
@@ -525,7 +532,7 @@ function shopCell(row, shop, openDetails) {
   if (!item) return '—';
   const detailKey = `${row.key}:shop:${shop.key}`;
   const label = item.price_eur != null ? euro(item.price_eur) + (item.price_basis === 'loyalty' ? ' · Loyalty price' : '') : item.status.replaceAll('_', ' ');
-  const observations = (item.observations || []).map(offer => `<div class="v5-offer"><b>${escapeHtml(offer.marketplace)}</b>${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="muted">${escapeHtml(new Date(offer.checked_at).toLocaleString('en-GB'))}${offer.cached ? ' · cached' : ''}</span></div>`).join('');
+  const observations = (item.observations || []).map(offer => `<div class="v5-offer"><b>${escapeHtml(offer.marketplace)}</b>${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="muted">${escapeHtml(new Date(offer.checked_at).toLocaleString(uiLocale()))}${offer.cached ? ' · cached' : ''}</span></div>`).join('');
   const warning = priceAnomalyWarning(row, item.price_eur);
   return `<details class="cell-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary><span class="${warning ? 'price-anomaly' : ''}" title="${escapeHtml(warning)}">${badge(label, statusClass(item.status))}</span></summary><div class="detail-offer"><span>Marketplace observations only. The retailer was not queried.</span>${item.coverage !== 'complete' ? '<span class="muted">Coverage incomplete — more offers may exist.</span>' : ''}${observations || '<span>No captured offers from this seller.</span>'}</div></details>`;
 }
@@ -626,7 +633,7 @@ function renderActionRequired(run) {
     const sellerField = `<label>Seller / shop<input data-action-field="seller" autocomplete="off" value="${escapeHtml(previous.seller_name || '')}" placeholder="Seller shown on the marketplace" required></label><label>Availability<select data-action-field="availability"><option value="UNKNOWN">Availability unknown</option><option value="IN_STOCK">In stock</option><option value="PRE_ORDER">Pre-order</option><option value="OUT_OF_STOCK">Out of stock</option></select></label>`;
     const attrs = `data-check-kind="${item.action_kind}" data-item-id="${item.item_id}" data-source-key="${escapeHtml(item.action_key)}"`;
     const cooldown = false;
-    const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString('en-GB') : '';
+    const retryAt = item.retry_after ? new Date(item.retry_after).toLocaleString(uiLocale()) : '';
     const retryAction = item.action_key === 'salidzini'
       ? `${state.salidziniMode !== 'manual' ? `<button type="button" data-check-action="retry" ${attrs}>Retry automatic check</button>` : ''}<span class="muted">Open &amp; collect waits for CAPTCHA and saves verified results automatically. To select offers yourself: Open only → Send to PriceMonitor → review and save. Each marketplace is a separate check.</span>`
       : cooldown
@@ -681,13 +688,13 @@ async function handleActionDialog(event) {
     const entered = actionItem.querySelector('[data-action-field="price"]').value;
     const price = Number(entered.trim().replace(',', '.'));
     if (!entered.trim() || !Number.isFinite(price) || price <= 0) {
-      const field = actionItem.querySelector('[data-action-field="price"]'); field.setCustomValidity('Enter a valid non-negative price.'); field.reportValidity(); field.setCustomValidity('');
+      const field = actionItem.querySelector('[data-action-field="price"]'); field.setCustomValidity(uiText('Enter a valid non-negative price.')); field.reportValidity(); field.setCustomValidity('');
       return;
     }
     payload = { status: 'SUCCESS', price_eur: price, availability: actionItem.querySelector('[data-action-field="availability"]').value };
     const seller = actionItem.querySelector('[data-action-field="seller"]');
     if (seller) {
-      if (!seller.value.trim()) { seller.setCustomValidity('Enter the seller shown on the marketplace.'); seller.reportValidity(); seller.setCustomValidity(''); return; }
+      if (!seller.value.trim()) { seller.setCustomValidity(uiText('Enter the seller shown on the marketplace.')); seller.reportValidity(); seller.setCustomValidity(''); return; }
       payload.seller_name = seller.value.trim();
     }
   }
@@ -778,14 +785,14 @@ async function saveResultCorrection(status) {
   if (status === 'SUCCESS') {
     const price = Number(byId('correction-price').value.trim().replace(',', '.'));
     if (!byId('correction-price').value.trim() || !Number.isFinite(price) || price <= 0) {
-      const field = byId('correction-price'); field.setCustomValidity('Enter a valid non-negative price.'); field.reportValidity(); field.setCustomValidity(''); return;
+      const field = byId('correction-price'); field.setCustomValidity(uiText('Enter a valid non-negative price.')); field.reportValidity(); field.setCustomValidity(''); return;
     }
     payload.price_eur = price; payload.availability = byId('correction-availability').value;
     if (kind === 'marketplaces') {
       payload.seller_name = byId('correction-seller').value.trim();
       if (!payload.seller_name) { byId('correction-seller').reportValidity(); return; }
       payload.product_url = byId('correction-url').value.trim() || null;
-      if (!payload.product_url) { const field = byId('correction-url'); field.setCustomValidity('Enter the link supporting this corrected price.'); field.reportValidity(); field.setCustomValidity(''); return; }
+      if (!payload.product_url) { const field = byId('correction-url'); field.setCustomValidity(uiText('Enter the link supporting this corrected price.')); field.reportValidity(); field.setCustomValidity(''); return; }
       if (!byId('correction-url').checkValidity()) { byId('correction-url').reportValidity(); return; }
     }
   }
@@ -890,7 +897,7 @@ async function loadMonitoringHistory() {
       const checks = Number(run.shop_checks || 0) + Number(run.assisted_checks || 0);
       const current = run.run_id === state.currentRunId ? ' current' : '';
       const mode = String(run.run_mode || 'balanced');
-      return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString('en-GB'))}</strong><span>${badge(run.status, statusClass(run.status))} · ${escapeHtml(mode[0].toUpperCase() + mode.slice(1))} · ${checks} marketplace checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
+      return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString(uiLocale()))}</strong><span>${badge(run.status, statusClass(run.status))} · ${escapeHtml(mode[0].toUpperCase() + mode.slice(1))} · ${checks} marketplace checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
     }).join('') : '<span class="muted">No monitoring runs yet.</span>';
   } catch (error) { byId('monitoring-history').classList.add('muted'); byId('monitoring-history').textContent = `History unavailable: ${error.message}`; }
   finally { state.historyLoading = false; }
@@ -913,7 +920,7 @@ async function startRun() {
 }
 
 async function hardStopRun() {
-  if (!state.currentRunId || !window.confirm('Stop the current monitoring run immediately? Completed results will be kept.')) return;
+  if (!state.currentRunId || !window.confirm(uiText('Stop the current monitoring run immediately? Completed results will be kept.'))) return;
   const button = byId('stop-run'); button.disabled = true; button.textContent = 'Stopping…'; state.stopRequested = true;
   try {
     if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
@@ -994,7 +1001,7 @@ function wireEvents() {
   byId('result-rows').addEventListener('click', async event => {
     const button = event.target.closest('[data-remove-offer]');
     if (!button) return;
-    if (!window.confirm('Remove this false match from the current run?')) return;
+    if (!window.confirm(uiText('Remove this false match from the current run?'))) return;
     try {
       await api(`/runs/${encodeURIComponent(state.currentRunId)}/marketplaces/${button.dataset.item}/${encodeURIComponent(button.dataset.key)}/offers/${button.dataset.removeOffer}`, {method:'DELETE'});
       await pollRun(state.currentRunId);
@@ -1011,6 +1018,7 @@ function wireEvents() {
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
+  byId('workbook-file').addEventListener('change', event => updateFileName(event.target)); byId('stock-file').addEventListener('change', event => updateFileName(event.target));
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
   document.addEventListener('click', event => { if (!event.target.closest('.run-clear-control')) byId('clear-run-popover').hidden = true; });
   byId('run-mode').addEventListener('change', updateRunModeHelp);

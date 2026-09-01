@@ -1,4 +1,4 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.10
+# PriceMonitor v5 Marketplace Bridge · 5.0.11
 
 ## Open & collect
 

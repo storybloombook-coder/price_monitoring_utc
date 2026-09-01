@@ -35,6 +35,12 @@ a { color: var(--blue); }
 .version { display: inline-flex; vertical-align: middle; padding: 3px 9px; border-radius: 999px; color: #fff; background: var(--brand); font-size: 12px; letter-spacing: .03em; }
 .service-state { padding: 8px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); white-space: nowrap; }
 .service-state.ok { color: var(--brand); }
+.header-controls { display: grid; justify-items: end; gap: 8px; }
+.language-switch { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); box-shadow: inset 0 1px 2px rgba(0,0,0,.08); }
+.language-switch button { min-width: 40px; padding: 5px 10px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); box-shadow: none; font-size: 11px; }
+.language-switch button:hover { background: color-mix(in srgb, var(--brand) 9%, transparent); color: var(--text); }
+.language-switch button.active { background: var(--brand); color: white; box-shadow: 0 2px 5px color-mix(in srgb, var(--brand) 32%, transparent); }
+.language-switch button:active { transform: scale(.96); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; box-shadow: var(--shadow); margin-bottom: 18px; padding: 20px; }
 .section-heading, .panel-heading, .dialog-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .catalog-heading-actions { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
@@ -69,6 +75,13 @@ button.clear-table:hover { background: color-mix(in srgb, var(--danger) 84%, #00
 button.clear-table:active { transform: translateY(2px); box-shadow: inset 0 2px 3px rgba(0,0,0,.24); }
 button.danger-fill { color: #fff; background: var(--danger); border-color: var(--danger); }
 input[type="file"] { max-width: 280px; }
+.file-picker { position: relative; overflow: hidden; display: inline-flex; align-items: center; }
+.file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.file-picker span { display: inline-flex; min-height: 38px; align-items: center; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); font-weight: 700; cursor: pointer; box-shadow: 0 1px 1px rgb(15 23 42 / 4%); transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease; }
+.file-picker:hover span { border-color: var(--green); box-shadow: 0 3px 10px rgb(22 101 52 / 10%); }
+.file-picker:active span { transform: translateY(1px) scale(.98); }
+.file-picker input:focus-visible + span { outline: 3px solid rgb(34 197 94 / 22%); outline-offset: 2px; }
+.file-name { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 input[type="search"], input[type="text"], input[type="number"], input[type="url"], input:not([type]), select {
   width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 8px; padding: 8px 10px;
 }
@@ -282,6 +295,7 @@ dialog form { padding: 20px; }
   main { width: min(100% - 18px, 1440px); margin-top: 12px; }
   .app-header, .section-heading { flex-direction: column; }
   .service-state { white-space: normal; }
+  .header-controls { justify-items: start; }
   .toolbar, .form-grid { grid-template-columns: 1fr; }
   .country-shops, .shop-link-grid { grid-template-columns: 1fr; }
   .summary-text { display: none; }
