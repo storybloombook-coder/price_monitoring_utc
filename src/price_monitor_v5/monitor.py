@@ -21,19 +21,75 @@ class MarketplaceMonitor:
         self.locks = {s.key: asyncio.Lock() for s in MARKETPLACES}
         self.last_request = {}
         self.cooldowns = store.get_meta("v5_cooldowns", {})
-        self.browser_pauses = {}
+        # Live queue status belongs to the running process, not to a stored run
+        # snapshot. The UI uses this to explain what is happening right now.
+        self.activities = {}
+        self.batches = {}
         self.verification_jobs = {}
 
     def launch(self, run_id):
-        for task in self.store.checks(run_id):
-            if task["status"] == "PENDING":
-                self.schedule(task)
+        tasks = [task for task in self.store.checks(run_id) if task["status"] == "PENDING"]
+        self.begin_batch(run_id, tasks, "Full monitoring run")
+        for task in tasks:
+            self.schedule(task)
+
+    def begin_batch(self, run_id, tasks, label="Retry unresolved"):
+        self.batches[run_id] = {
+            "label": label,
+            "started_at": utc_now(),
+            "started_monotonic": time.monotonic(),
+            "ids": [(task["run_id"], task["item_id"], task["marketplace_key"]) for task in tasks],
+            "stopped": False,
+        }
+        self.activities[run_id] = {}
 
     def schedule(self, task, capture=False):
         ident = (task["run_id"], task["item_id"], task["marketplace_key"])
         if ident in self.jobs:
             self.jobs[ident].cancel()
+        self.set_activity(task, "Queued for marketplace check")
         self.jobs[ident] = asyncio.create_task(self.check(task, capture))
+
+    def set_activity(self, task, message):
+        self.activities.setdefault(task["run_id"], {})[task["marketplace_key"]] = {
+            "marketplace": task.get("marketplace") or task.get("marketplace_key", ""),
+            "marketplace_key": task.get("marketplace_key", ""),
+            "model": task.get("source_model") or task.get("canonical_model", ""),
+            "message": message,
+            "updated_at": utc_now(),
+        }
+
+    def activity(self, run_id):
+        values = list(self.activities.get(run_id, {}).values())
+        return max(values, key=lambda item: item.get("updated_at", ""), default=None)
+
+    def progress(self, run_id):
+        batch = self.batches.get(run_id)
+        if not batch:
+            return None
+        elapsed = max(0.0, time.monotonic() - batch["started_monotonic"])
+        snapshots = {(task["run_id"],task["item_id"],task["marketplace_key"]):task
+                     for task in self.store.checks(run_id)}
+        rows = []
+        for key in dict.fromkeys(ident[2] for ident in batch["ids"]):
+            ids = [ident for ident in batch["ids"] if ident[2] == key]
+            statuses = [snapshots.get(ident, {}).get("status") for ident in ids]
+            queued = statuses.count("PENDING")
+            running = statuses.count("RUNNING")
+            remaining = queued + running
+            finished = len(ids) - remaining
+            needs_review = sum(status in {"ACTION_REQUIRED","FAILED","INCOMPLETE"} for status in statuses)
+            estimate = round((elapsed / finished) * remaining) if finished and remaining else 0
+            event = self.activities.get(run_id, {}).get(key)
+            rows.append({
+                "marketplace_key": key,
+                "marketplace": next((source.name for source in MARKETPLACES if source.key == key), key),
+                "total": len(ids), "finished": finished, "remaining": remaining,
+                "queued": queued, "running": running, "needs_review": needs_review,
+                "eta_seconds": estimate, "current": event,
+            })
+        return {"label": batch["label"], "started_at": batch["started_at"],
+                "stopped": batch.get("stopped", False), "marketplaces": rows}
 
     def blocked(self, key):
         return self.cooldowns.get(key, "") > utc_now()
@@ -83,14 +139,13 @@ class MarketplaceMonitor:
                 if not verification and key == 'salidzini' and task.get('salidzini_mode') == 'manual':
                     raise ReviewRequired('Manual mode: no background requests. Choose Open & collect for a one-click check, or Open only → Send to PriceMonitor to review offers yourself.')
                 if automatic and not verification:
-                    if self.browser_pauses.get(task['run_id']):
-                        raise ReviewRequired(self.browser_pauses[task['run_id']])
                     if not self.bridge.connected or not getattr(self.bridge, 'automatic_salidzini', False):
                         raise ReviewRequired('Salidzini Auto needs the connected v5.0.8+ extension. Reload/connect it, then retry; manual page capture remains available.')
                     capture = True
                 if self.blocked(key) and not capture:
                     raise ReviewRequired("Automatic requests are cooling down. Manual offer entry and browser capture are available now.")
                 task.update(status="RUNNING",error=None,error_code=None,offers=[],cached=False,attempts=0)
+                self.set_activity(task, "Starting check")
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
                 async with asyncio.timeout(900 if verification else 180 if automatic else 90 if capture else 65):
@@ -107,10 +162,10 @@ class MarketplaceMonitor:
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError):
             task.update(status="ACTION_REQUIRED", coverage="partial", error_code="NETWORK_UNAVAILABLE",
                         error="Network connection failed before the marketplace could be read. Check Internet/firewall/proxy access and restart PriceMonitor from its folder. This is not a CAPTCHA or a missing product.")
+            self.set_activity(task, "Network unavailable — moved to review; queue continues")
         except Exception as error:
             task.update(status="ACTION_REQUIRED", coverage="partial", error=str(error) or "Check timed out; use manual review")
-            if automatic and not verification:
-                self.browser_pauses.setdefault(task['run_id'], 'Salidzini Auto paused after a browser/collection error. Inspect the page, then Retry automatic check; manual capture remains available.')
+            self.set_activity(task, "Needs review — continuing with the next check")
             if self.blocked(key) and not automatic:
                 task["retry_after"] = self.cooldowns[key]
         finally:
@@ -135,12 +190,17 @@ class MarketplaceMonitor:
                         complete = task['status'] in {'SUCCESS','NOT_FOUND'} and task.get('coverage') in {'complete','reported_gap'}
                         self.bridge.finish_verification(verification, 'complete' if complete else 'review',
                                                         status=task['status'], error=task.get('error'))
+                    if not any(run_id == task['run_id'] for run_id, _, _ in self.jobs):
+                        self.activities.pop(task['run_id'], None)
+                        if task['run_id'] in self.batches:
+                            self.batches[task['run_id']]["completed_at"] = utc_now()
 
     async def collect(self, task, client, capture):
         task.update(search_queries=[], candidate_matches=[], collection_revision=4)
         queries = [None] + shortened_queries(task["source_model"])
         for query in queries:
             task["search_queries"].append(query or task["source_model"])
+            self.set_activity(task, "Checking original SKU" if query is None else f"Retrying shortened SKU: {query}")
             await self.collect_once(task, client, capture, query)
             if task["status"] != "NOT_FOUND":
                 return
@@ -162,6 +222,7 @@ class MarketplaceMonitor:
         expected_counts = {}
         authoritative_pages = set()
         partial, empty, fallback = False, False, False
+        rejected_count = 0
         salidzini_ids, salidzini_seen_ids, salidzini_totals = set(), set(), []
         while queue and len(seen)<12:
             url = marketplace_url(key,queue.pop(0))
@@ -169,6 +230,7 @@ class MarketplaceMonitor:
                 continue
             seen.add(url)
             try:
+                self.set_activity(task, f"Reading marketplace page {len(seen)}")
                 if capture:
                     automatic = key == 'salidzini' and task.get('salidzini_mode') == 'auto'
                     verification = task.get('verification_id')
@@ -185,9 +247,6 @@ class MarketplaceMonitor:
                     else:
                         result = await self.bridge.capture(key,model,url)
                     if result.get("security_challenge") or result.get("error"):
-                        if automatic and not verification:
-                            self.browser_pauses[task['run_id']] = ('Salidzini browser queue paused: ' +
-                                (result.get('error') or 'CAPTCHA detected') + '. Resolve the open page, then Retry automatic check; or use manual capture.')
                         raise ReviewRequired(result.get("error") or "Complete the marketplace CAPTCHA before capturing")
                     content, final = result.get("html", ""), marketplace_url(key,result.get("url") or url)
                     if (automatic or verification and key == 'salidzini') and not same_salidzini_search(final, url):
@@ -200,6 +259,7 @@ class MarketplaceMonitor:
                 else:
                     content, final = await self.fetch(client,key,url)
                 parsed = parse_page(key,model,content,final)
+                self.set_activity(task, f"Classifying offers on page {len(seen)}")
                 if key == 'salidzini':
                     salidzini_ids.update(parsed.get('salidzini_offer_ids', []))
                     salidzini_seen_ids.update(parsed.get('salidzini_seen_ids', []))
@@ -214,7 +274,14 @@ class MarketplaceMonitor:
                     fallback = True
                     continue
                 raise
-            empty |= parsed["not_found"]
+            # Confidently rejected cards are unrelated products, not an
+            # incomplete parser result. They can prove absence after all pages
+            # and fallback queries have been checked.
+            empty |= parsed["not_found"] or bool(parsed.get("rejected") and not parsed["offers"] and not parsed["links"])
+            rejected_count += int(parsed.get("rejected") or 0)
+            # Exact SKU rows with a malformed price/seller are incomplete;
+            # unrelated cards are merely documented as rejected.
+            partial |= bool(parsed.get("ambiguous"))
             if parsed.get("authoritative_url"):
                 # Replace search-card snapshots for this comparison only. Do not
                 # double-count them or keep stale search prices beside live rows.
@@ -227,7 +294,6 @@ class MarketplaceMonitor:
             if parsed.get("coverage_url"):
                 group = parsed["coverage_url"]
                 expected_counts[group] = max(expected_counts.get(group, 0), parsed.get("expected_offer_count", 0))
-                partial |= bool(parsed["rejected"])
             else:
                 partial |= parsed["partial"]
             queue.extend(u for u in parsed["links"] if u not in seen and u not in queue)
@@ -242,25 +308,35 @@ class MarketplaceMonitor:
             if url == saved and not parsed["offers"] and not parsed["links"] and discovery not in seen:
                 queue.append(discovery)
                 fallback = True
-            if not parsed["offers"] and not parsed["links"] and not parsed["not_found"] and url != saved:
+            if not parsed["offers"] and not parsed["links"] and not parsed["not_found"] and not parsed.get("rejected") and url != saved:
                 partial = True
         unique = {(o["store"].lower(),o["price_eur"],o["availability"],o["url"]):o for o in offers}
         reported_gap = False
         if key == 'salidzini' and (offers or any(n is not None for n in salidzini_totals)):
             expected = max((n for n in salidzini_totals if n is not None), default=None)
-            counted = salidzini_ids if offers else salidzini_seen_ids
+            # Completion is based on listings inspected, not only accepted
+            # offers. A rejected accessory or wrong SKU has already been
+            # examined and must not create needless manual work.
+            counted = salidzini_seen_ids
             totals_consistent = expected is not None and not any(n is None for n in salidzini_totals) and len(set(salidzini_totals)) == 1
-            gap = expected - len(salidzini_ids) if expected is not None else None
+            gap = expected - len(salidzini_seen_ids) if expected is not None else None
             # Salidzini's visible heading can be one or two above the actual
             # rendered /click.php listing cards. If every rendered card was
             # safely parsed and at least 75% of the reported total is present,
             # retain a truthful non-cacheable Success instead of asking the
             # user to repeat a manual check that cannot reveal more rows.
             reported_gap = bool(offers and not partial and not queue and totals_consistent and
-                                salidzini_ids == salidzini_seen_ids and gap is not None and 0 < gap <= 2 and
-                                len(salidzini_ids) / expected >= .75)
+                                gap is not None and 0 < gap <= 2 and
+                                len(salidzini_seen_ids) / expected >= .75)
             partial |= not reported_gap and (not totals_consistent or len(counted) != expected)
-            task['coverage_detail'] = f'{len(salidzini_ids)} verified listings / {expected if expected is not None else "unknown"} reported; {len(seen)} page(s) read'
+            # Some layouts omit a malformed/mismatched raw offer before the
+            # normalizer can record it. The inspected-vs-accepted ID delta is
+            # still authoritative for the user-facing audit trail.
+            rejected_count = max(rejected_count, len(salidzini_seen_ids) - len(salidzini_ids))
+            task['coverage_detail'] = (f'{len(salidzini_seen_ids)} listings inspected / '
+                                       f'{expected if expected is not None else "unknown"} reported; '
+                                       f'{len(unique)} exact offers saved; {rejected_count} unrelated rejected; '
+                                       f'{len(seen)} page(s) read')
         for group, expected in expected_counts.items():
             # Count across pagination, not each page in isolation. Missing rows
             # remain partial even if the final page omits the aggregate count.
@@ -295,6 +371,10 @@ class MarketplaceMonitor:
             if task["status"] in {"RUNNING","PENDING"}:
                 task.update(status="INCOMPLETE",error="Stopped by user",finished_at=utc_now(),coverage="partial")
                 self.store.save_check(task)
+        if run_id in self.batches:
+            self.batches[run_id]["stopped"] = True
+            self.batches[run_id]["completed_at"] = utc_now()
+        self.activities.pop(run_id, None)
 
     async def close(self):
         for ident in list(self.jobs):
@@ -318,7 +398,6 @@ class MarketplaceMonitor:
             self.verification_jobs[(run_id,item_id,key)] = task['verification_id']
         if key == 'salidzini':
             task['salidzini_mode'] = self.store.salidzini_mode()
-            self.browser_pauses.pop(run_id, None)
         if url:
             task["product_url"] = marketplace_url(key,url)
             self.store.remember_source_link(item_id,key,url)

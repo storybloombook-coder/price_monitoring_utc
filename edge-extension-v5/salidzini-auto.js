@@ -1,5 +1,5 @@
 // One owned tab, bounded loading, no CAPTCHA clicks and no retailer navigation.
-const SALIDZINI_AUTO_TIMEOUT = 20000;
+const SALIDZINI_AUTO_TIMEOUT = 12000;
 const salidziniTimers = new Map();
 
 function sameSalidziniSearch(first, second) {
@@ -64,9 +64,13 @@ async function inspectAutomaticSalidzini(jobId, record) {
   try {
     if (!await automaticJobAlive(record)) {
       await discardAutomaticJob(jobId,record);
-      // Stop the extension-owned navigation; never close a user's verification tab.
+      // This is an extension-owned automation tab, not a user's verification
+      // tab. Close it after Hard stop instead of leaving a confusing blank tab.
       const saved = (await chrome.storage.local.get('salidziniAutoTab')).salidziniAutoTab;
-      if (saved?.id === record.tabId) await chrome.tabs.update(record.tabId,{url:'about:blank'}).catch(()=>{});
+      if (saved?.id === record.tabId) {
+        await chrome.storage.local.remove('salidziniAutoTab');
+        await chrome.tabs.remove(record.tabId).catch(()=>{});
+      }
       return;
     }
     const tab = await chrome.tabs.get(record.tabId);

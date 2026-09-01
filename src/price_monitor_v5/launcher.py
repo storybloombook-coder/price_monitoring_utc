@@ -12,6 +12,7 @@ import webbrowser
 
 import uvicorn
 
+from . import __version__
 from .app import create_app
 from .config import Settings
 
@@ -47,10 +48,10 @@ def open_application_page(url: str) -> bool:
     return False
 
 
-def open_browser_when_ready(url: str) -> None:
+def open_browser_when_ready(url: str, page_url: str | None = None) -> None:
     for _ in range(80):
         if application_is_ready(url):
-            open_application_page(url)
+            open_application_page(page_url or url)
             return
         time.sleep(0.25)
     LOG.error("Application did not become ready: %s", url)
@@ -59,6 +60,9 @@ def open_browser_when_ready(url: str) -> None:
 def main() -> None:
     settings = Settings.load()
     url = f"http://{settings.host}:{settings.port}"
+    # A versioned page URL forces Chromium to request the current HTML instead
+    # of merely focusing a same-address tab that still contains an older UI.
+    page_url = f"{url}/?v={__version__}"
     log_dir = settings.catalog_database.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(log_dir / "launcher.log", maxBytes=256_000, backupCount=2, encoding="utf-8")
@@ -69,17 +73,17 @@ def main() -> None:
     if application_is_ready(url):
         LOG.info("Reusing existing v5 instance at %s", url)
         if settings.open_browser:
-            open_application_page(url)
+            open_application_page(page_url)
         return
     if settings.open_browser:
-        threading.Thread(target=open_browser_when_ready, args=(url,), daemon=True, name="open-browser").start()
+        threading.Thread(target=open_browser_when_ready, args=(url,page_url), daemon=True, name="open-browser").start()
     LOG.info("Starting v5 at %s (open_browser=%s)", url, settings.open_browser)
     try:
         uvicorn.run(create_app(settings=settings), host=settings.host, port=settings.port, log_level="info")
     except SystemExit:
         # A simultaneous second launch may have won the port after the first check.
         if application_is_ready(url) and settings.open_browser:
-            open_application_page(url)
+            open_application_page(page_url)
         else:
             LOG.exception("Server failed to start")
             raise

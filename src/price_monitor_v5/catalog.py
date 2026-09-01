@@ -191,6 +191,16 @@ class CatalogStore(BaseCatalog):
                     task["cached"] = True
                 self.save_check(task)
 
+    def resume_monitoring_session(self, run_id):
+        """A retry is a new bounded queue for the same immutable result table."""
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                "UPDATE monitoring_sessions SET stopped_at=NULL WHERE run_id=? AND cleared_at IS NULL",
+                (run_id,),
+            )
+            if not cursor.rowcount:
+                raise KeyError(run_id)
+
     def cached_check(self, canonical, key, hours):
         if not hours:
             return None
@@ -257,7 +267,10 @@ class CatalogStore(BaseCatalog):
                 observations = [{**o, "marketplace": t["marketplace"], "checked_at": t.get("finished_at"), "cached": t.get("cached",False)} for t in model_tasks for o in t.get("offers",[]) if o.get("seller_key") == shop.key]
                 in_stock = [o for o in observations if o["availability"] == "IN_STOCK"]
                 best = min(in_stock or observations, key=lambda o:o["price_eur"], default={})
-                complete = all(t["status"] in {"SUCCESS","NOT_FOUND"} and t.get("coverage") == "complete" for t in model_tasks)
+                # Salidzini can truthfully report a small heading/count gap
+                # after every visible card was inspected. Treat that as a
+                # completed marketplace observation rather than unverified.
+                complete = all(t["status"] in {"SUCCESS","NOT_FOUND"} and t.get("coverage") in {"complete", "reported_gap"} for t in model_tasks)
                 status = "SUCCESS" if best else "NOT_LISTED" if complete else "UNVERIFIED"
                 shops.append({"item_id": item_id, "model": model_tasks[0]["source_model"], "shop_key": shop.key,"shop_name": shop.name,"status":status,
                               "observations": observations, "price_eur": best.get("price_eur"), "availability": best.get("availability"),

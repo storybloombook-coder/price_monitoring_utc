@@ -1,4 +1,8 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.11
+# PriceMonitor v5 Marketplace Bridge · 5.0.13
+
+In 5.0.13, Salidzini Auto recognizes additional Latvian empty-result layouts,
+uses a 12-second bounded readiness window, and closes its extension-owned tab
+after PriceMonitor Hard stop. User-opened verification tabs remain untouched.
 
 ## Open & collect
 

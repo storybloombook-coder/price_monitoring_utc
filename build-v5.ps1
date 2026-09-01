@@ -3,13 +3,15 @@ $ErrorActionPreference = 'Stop'
 $pmRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pmPython = Join-Path $pmRoot '.venv/Scripts/python.exe'
 $pmBuild = Join-Path $pmRoot 'build/v5-package'
-$pmName = 'PriceMonitor-v5.0.0-windows-x64-portable'
+$pmName = 'PriceMonitor-v5.0.13-windows-x64-portable'
 $pmPortable = Join-Path (Join-Path $pmRoot 'dist') $pmName
 Push-Location $pmRoot
 try {
     $env:PYTHONPATH = Join-Path $pmRoot 'src'
     if (-not $SkipTests) {
-        & $pmPython -m pytest -q -p no:cacheprovider
+        $pmTestTemp = Join-Path $pmBuild 'pytest'
+        New-Item -ItemType Directory -Path $pmTestTemp -Force | Out-Null
+        & $pmPython -m pytest -q -p no:cacheprovider --basetemp $pmTestTemp
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     }
     & $pmPython -m PyInstaller --noconfirm --clean --onedir --windowed --noupx --name PriceMonitor `

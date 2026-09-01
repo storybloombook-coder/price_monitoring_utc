@@ -84,7 +84,8 @@ function extractRenderedPage(model) {
   clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript, input, textarea, select, iframe').forEach(node => node.remove());
   const html = clone.outerHTML;
   const cards = [...document.querySelectorAll('.item_box_main')];
-  const empty = /\b0\s+preces?\b|nekas netika atrasts/i.test(text);
+  const empty = /\b0\s+preces?\b|nekas netika atrasts|preces? nav atrastas?|nav atrasta neviena prece|meklēšanas rezultāti nav atrasti|nav meklēšanas rezultātu|\b0\s+rezultāti\b/i.test(text) ||
+    Boolean(document.querySelector('.no-results, .search-no-results, .search_no_results, #no-results, #no_results'));
   const fingerprint = cards.map(n => n.innerText).join('|');
   const resultNodes=[...document.querySelectorAll('.product-item-h-wrap, .seller-item-table, tr.offer, .product-name')];
   // Ads/clocks outside the offer list must not prevent stable result detection.

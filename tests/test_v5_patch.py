@@ -24,7 +24,7 @@ def test_second_launch_opens_existing_instance_without_starting_server(monkeypat
     monkeypatch.setattr(launcher, "open_application_page", lambda url: opened.append(url))
     monkeypatch.setattr(launcher.uvicorn, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Must reuse server")))
     launcher.main()
-    assert opened == ["http://127.0.0.1:8050"]
+    assert opened == ["http://127.0.0.1:8050/?v=5.0.13"]
 
 
 def test_browser_waits_for_health(monkeypatch):
@@ -103,6 +103,39 @@ def test_catalog_clear_api_confirmation_and_running_guard(tmp_path):
         assert len(client.get("/catalog/items?kind=source").json()) == 1
         assert client.post("/catalog/clear/source", json={"confirm": True}).json()["moved_to_trash"] == 1
         assert len(client.get("/catalog/items?kind=source&scope=trash").json()) == 1
+
+
+def test_retry_unresolved_is_filtered_bounded_and_resumes_stopped_run(tmp_path):
+    store = CatalogStore(tmp_path / "catalog.db")
+    for index in range(6):
+        store.create_item("source", {"model": f"32S4K{index}"})
+    store.begin_run("retry-batch", "deep")
+    for task in store.checks("retry-batch"):
+        task.update(status="ACTION_REQUIRED", error="review")
+        store.save_check(task)
+    store.stop_monitoring_session("retry-batch")
+    app = create_app(Settings.load(tmp_path), store)
+    scheduled = []
+    app.state.monitor.schedule = lambda task, capture=False: scheduled.append((task["marketplace_key"], task["item_id"], capture))
+    with TestClient(app) as client:
+        response = client.post("/runs/retry-batch/retry-unresolved", json={
+            "marketplace_key": "salidzini", "limit": 5, "include_not_found": False,
+        })
+        assert response.status_code == 200 and response.json()["checks_started"] == 5
+        assert len(scheduled) == 5 and {item[0] for item in scheduled} == {"salidzini"}
+        assert store.monitoring_session("retry-batch")["stopped_at"] is None
+        progress = client.get("/runs/retry-batch").json()["execution"]["queue_progress"]
+        assert progress["marketplaces"][0]["total"] == 5
+        assert progress["marketplaces"][0]["queued"] == 5
+        assert client.post("/runs/retry-batch/retry-unresolved", json={"limit": 7}).status_code == 400
+
+
+def test_index_is_not_cached_between_versions(tmp_path):
+    with TestClient(create_app(Settings.load(tmp_path))) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert "v5.0.13" in response.text
 
 
 def test_network_failure_is_not_reported_as_captcha_or_not_found(tmp_path):

@@ -3,10 +3,10 @@ VSVersionInfo(
   kids=[StringFileInfo([StringTable('040904B0',[
     StringStruct('CompanyName','UTC Distribution'),
     StringStruct('FileDescription','Price Monitor v5'),
-    StringStruct('FileVersion','5.0.11'),
+    StringStruct('FileVersion','5.0.13'),
     StringStruct('InternalName','PriceMonitor'),
     StringStruct('OriginalFilename','PriceMonitor.exe'),
     StringStruct('ProductName','Price Monitor v5'),
-    StringStruct('ProductVersion','5.0.11')])]),
+    StringStruct('ProductVersion','5.0.13')])]),
     VarFileInfo([VarStruct('Translation',[1033,1200])])]
 )

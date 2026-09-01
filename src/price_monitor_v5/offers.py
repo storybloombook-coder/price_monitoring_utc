@@ -257,7 +257,7 @@ def parse_page(key, model, content, page_url):
     title = next((n.text() for n in nodes if n.tag == "h1"), "")
     is_product = (key == "hinnavaatlus" and bool(re.match(r"/\d+/", urlsplit(page_url).path))) or (key == "kaina24" and "/p/" in page_url)
     product_match = is_product and bool(matched_model(key, model, title))
-    offers, links, rejected = [], [], 0
+    offers, links, rejected, ambiguous = [], [], 0, 0
     salidzini_ids = set()
     salidzini_seen_ids = set()
     heading = next((n for n in nodes if n.tag == 'h1'), None)
@@ -299,6 +299,9 @@ def parse_page(key, model, content, page_url):
                     # any second amount, but do not discard "111,83 € PVN 0%".
                     if key == 'salidzini' and not re.fullmatch(r'\s*(?:€|EUR)?\s*\d+(?:[ .]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR)?(?:\s*PVN\s*0\s*%)?\s*', cash, re.I):
                         rejected += 1
+                        # This is an exact SKU with an unreadable price, not an
+                        # unrelated listing. It must remain reviewable.
+                        ambiguous += 1
                         continue
                     raw = {"store": seller.text(), "price_eur": price(cash), "title": evidence,
                            "availability": salidzini_availability(row) if key == 'salidzini' else availability(row.text())}
@@ -307,12 +310,16 @@ def parse_page(key, model, content, page_url):
                     offers.append(raw)
                 else:
                     rejected += 1
+                    ambiguous += 1
     # Explicit capture rows produced by the bundled v5 extension.
     for script in [n for n in nodes if n.tag == "script" and n.attrs.get("id") == "price-monitor-v5-offers"]:
         try:
             offers.extend(json.loads("".join(c for c in script.children if isinstance(c, str))))
         except (ValueError, TypeError):
             rejected += 1
+            # Raw offers get here only after their card passed the SKU check.
+            # Missing seller/price data is therefore incomplete evidence.
+            ambiguous += 1
     for node in nodes:
         if node.tag != "a" or not node.attrs.get("href"):
             continue
@@ -359,7 +366,7 @@ def parse_page(key, model, content, page_url):
         except (ValueError, TypeError):
             rejected += 1
     text = " ".join(doc.text().lower().split())
-    empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|pagal įvestą paieškos frazę nieko neradome|0 rezultāti|nekas netika atrasts", text))
+    empty = bool(re.search(r"0 toodet|tooteid ei leitud|prekių nerasta|pagal įvestą paieškos frazę nieko neradome|0 rezultāti|nekas netika atrasts|preces? nav atrastas?|nav atrasta neviena prece|meklēšanas rezultāti nav atrasti|nav meklēšanas rezultātu|0 rezultāti", text))
     empty |= key == 'salidzini' and salidzini_expected == 0
     # Recognized result cards for other models allow a shorter query. Broken
     # rows, unknown markup or incomplete pages must still go to manual review.
@@ -370,7 +377,10 @@ def parse_page(key, model, content, page_url):
         empty |= known_results and not any(re.match(r"/\d+/", urlsplit(u).path) for u in links)
     # Unfamiliar markup or zero extracted offers is NOT proof of absence.
     return {"offers": normalized, "links": links, "not_found": empty and not normalized,
-            "rejected": rejected, "title": title,
+            "rejected": rejected, "ambiguous": ambiguous, "title": title,
             "salidzini_expected_count": salidzini_expected, "salidzini_offer_ids": sorted(salidzini_ids),
             "salidzini_seen_ids": sorted(salidzini_seen_ids),
-            "partial": bool(rejected) or bool(normalized and key != "hinnavaatlus" and not (key == 'salidzini' and salidzini_expected is not None))}
+            # Rejected cards are an intentional exact-SKU safeguard. Their
+            # presence must not by itself turn a fully inspected page into a
+            # manual-review result.
+            "partial": bool(ambiguous or (normalized and key != "hinnavaatlus" and not (key == 'salidzini' and salidzini_expected is not None)))}

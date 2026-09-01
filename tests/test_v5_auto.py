@@ -73,15 +73,26 @@ def test_pagination_counts_listings_not_deduplicated_sellers(tmp_path):
         bridge=FakeBridge(pages);_,task=await collect(store,bridge)
         assert bridge.urls==[URL,URL+'&offset=1']
         assert task['status']=='SUCCESS'
-        assert task['coverage_detail'].startswith('2 verified listings / 2')
+        assert task['coverage_detail'].startswith('2 listings inspected / 2')
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('html', [REAL_CARDS, REAL_COUNTED.replace('3 preces','6 preces'), REAL_COUNTED.replace('12999,00','bad price',1)])
-def test_unproven_coverage_stays_in_review_with_prices(tmp_path,html):
+def test_salidzini_latvian_empty_result_is_final_not_found():
+    parsed = parse_page("salidzini", "25P1A", "<h1>TCL 25P1A</h1><p>Preces nav atrastas</p>", URL)
+    assert parsed["not_found"] and not parsed["partial"] and not parsed["offers"]
+
+
+@pytest.mark.parametrize('html,expected', [
+    (REAL_CARDS, 'ACTION_REQUIRED'),
+    (REAL_COUNTED.replace('3 preces','6 preces'), 'ACTION_REQUIRED'),
+    (REAL_COUNTED.replace('12999,00','bad price',1), 'ACTION_REQUIRED'),
+])
+def test_coverage_outcome_distinguishes_complete_from_incomplete(tmp_path,html,expected):
     async def scenario():
         _,task=await collect(CatalogStore(tmp_path/'db'),FakeBridge(html))
-        assert task['offers'] and task['status']=='ACTION_REQUIRED' and 'coverage' in task['error']
+        assert task['offers'] and task['status'] == expected
+        if expected == 'ACTION_REQUIRED':
+            assert 'coverage' in task['error']
     asyncio.run(scenario())
 
 
@@ -90,14 +101,14 @@ def test_small_marketplace_heading_gap_saves_visible_offers_without_cache(tmp_pa
         store=CatalogStore(tmp_path/'db')
         _,task=await collect(store,FakeBridge(REAL_COUNTED.replace('3 preces','4 preces')))
         assert task['status']=='SUCCESS' and task['coverage']=='reported_gap'
-        assert task['coverage_detail'].startswith('3 verified listings / 4 reported')
+        assert task['coverage_detail'].startswith('3 listings inspected / 4 reported')
         assert store.cached_check('115RM9L','salidzini',4) is None
         run=store.run('auto')
         assert next(s for s in run['shop_results'] if s['shop_key']=='bite')['status']=='UNVERIFIED'
     asyncio.run(scenario())
 
 
-def test_captcha_pauses_following_skus_without_more_browser_traffic(tmp_path):
+def test_captcha_marks_only_its_sku_and_queue_continues(tmp_path):
     async def scenario():
         store=CatalogStore(tmp_path/'db'); store.create_item('source',{'model':'25G64'});store.create_item('source',{'model':'32S4K'})
         store.begin_run('one','deep');bridge=FakeBridge({'html':'','security_challenge':True,'error':'CAPTCHA'})
@@ -105,7 +116,7 @@ def test_captcha_pauses_following_skus_without_more_browser_traffic(tmp_path):
         for task in store.checks('one'):
             if task['marketplace_key']=='salidzini': monitor.schedule(task)
         await asyncio.gather(*list(monitor.jobs.values()))
-        assert len(bridge.urls)==1 and all(t['status']=='ACTION_REQUIRED' for t in store.checks('one') if t['marketplace_key']=='salidzini')
+        assert len(bridge.urls)==2 and all(t['status']=='ACTION_REQUIRED' for t in store.checks('one') if t['marketplace_key']=='salidzini')
     asyncio.run(scenario())
 
 
@@ -152,6 +163,21 @@ def test_incomplete_nonmatching_page_is_not_not_found(tmp_path):
         page='<div><h1>TCL 115RM9L</h1>3 preces</div>'+modern_card(title='TCL 115RM9X')
         bridge=FakeBridge(page);_,task=await collect(CatalogStore(tmp_path/'db'),bridge)
         assert task['status']=='ACTION_REQUIRED' and len(bridge.urls)==1
+    asyncio.run(scenario())
+
+
+def test_rejected_unrelated_listing_does_not_block_complete_exact_offers(tmp_path):
+    async def scenario():
+        # Mirrors 34R83Q: two exact offers plus an unrelated card on a page
+        # whose heading reports all three listings.
+        page = ('<div><h1>TCL 34R83Q</h1><span>3 preces no 3 veikaliem</span></div>'
+                + modern_card(href='/click.php?itemid=1', title='TCL 34R83Q', price='712,80')
+                + modern_card(href='/click.php?itemid=2', title='TCL 34R83Q', price='769,00')
+                + modern_card(href='/click.php?itemid=3', title='TCL S45HE Soundbar', price='945,94'))
+        _, task = await collect(CatalogStore(tmp_path/'db'), FakeBridge(page), model='34R83Q')
+        assert task['status'] == 'SUCCESS' and task['coverage'] == 'complete'
+        assert [offer['price_eur'] for offer in task['offers']] == [712.8, 769.0]
+        assert '3 listings inspected / 3 reported; 2 exact offers saved; 1 unrelated rejected' in task['coverage_detail']
     asyncio.run(scenario())
 
 

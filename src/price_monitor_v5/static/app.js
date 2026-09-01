@@ -41,8 +41,8 @@ const PARSING_HELP = {
   salidzini: 'Auto uses the connected v5.0.8+ extension and one working tab, reads all result pages with pauses and finishes only after exact listings match the reported count. Geedo recommendations are excluded. CAPTCHA pauses the browser queue for manual verification. Manual mode sends no automatic requests: use Send to PriceMonitor, review and mark all pages reviewed to finish. No retailer pages are opened.'
 };
 function parsingInfo(key, label = key) {
-  const help = PARSING_HELP[key] ? PARSING_HELP[key] + SEARCH_FALLBACK_HELP : null;
-  return help ? `<span class="parsing-info"><button type="button" class="info-button" aria-label="How ${escapeHtml(label)} parsing works" aria-describedby="parsing-${escapeHtml(key)}">i</button><span role="tooltip" id="parsing-${escapeHtml(key)}">${escapeHtml(help)}</span></span>` : '';
+  const help = PARSING_HELP[key] ? [PARSING_HELP[key], SEARCH_FALLBACK_HELP].map(uiText).join('') : null;
+  return help ? `<span class="parsing-info"><button type="button" class="info-button" aria-label="${escapeHtml(uiText('How this marketplace is collected'))}" aria-describedby="parsing-${escapeHtml(key)}">i</button><span role="tooltip" id="parsing-${escapeHtml(key)}">${escapeHtml(help)}</span></span>` : '';
 }
 STATUS_HELP.cached = 'A recent marketplace observation was reused. Its original collection time is preserved.';
 const state = {
@@ -52,7 +52,7 @@ const state = {
   resultFilterKnown: { model: new Set(), status: new Set(), marketplace: new Set(), shop: new Set() },
   resultFilterInitialized: false,
   currentRunId: null, lastActionSignature: '', actionRenderSignature: '', actionItems: [], stopRequested: false,
-  historyLoading: false, resultRenderSignature: '', lastRunStatus: null,
+  historyLoading: false, resultRenderSignature: '', lastRunStatus: '', modelFilterQuery: '',
   hiddenColumns: new Set(JSON.parse(localStorage.getItem(HIDDEN_COLUMNS_KEY) || '[]'))
 };
 
@@ -162,14 +162,21 @@ function renderSummary() {
   byId('source-model-options').innerHTML = state.sourceOptions.filter(item => item.state !== 'trash').map(item => `<option value="${escapeHtml(item.model)}"></option>`).join('');
 }
 
-function renderMultiFilter(id, options, selected, onChange, emptyText = 'No options') {
+function renderMultiFilter(id, options, selected, onChange, emptyText = 'No options', searchable = false) {
   const root = byId(id); const menu = root.querySelector('.filter-menu');
-  menu.innerHTML = options.length ? options.map(option => `<label><input type="checkbox" value="${escapeHtml(option.value)}" ${selected.has(option.value) ? 'checked' : ''}> ${escapeHtml(option.label)}</label>`).join('') : `<span class="muted">${emptyText}</span>`;
-  menu.querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
+  const search = searchable ? `<input class="filter-search" type="search" value="${escapeHtml(root.dataset.query || '')}" placeholder="Search models…" aria-label="Search models">` : '';
+  menu.innerHTML = options.length ? `${search}<div class="filter-options">${options.map(option => `<label><input type="checkbox" value="${escapeHtml(option.value)}" ${selected.has(option.value) ? 'checked' : ''}> ${escapeHtml(option.label)}</label>`).join('')}</div>` : `<span class="muted">${emptyText}</span>`;
+  menu.querySelectorAll('input[type="checkbox"]').forEach(input => input.addEventListener('change', () => {
     if (input.checked) selected.add(input.value); else selected.delete(input.value);
     root.querySelector('summary').dataset.count = selected.size;
     onChange();
   }));
+  const searchInput = menu.querySelector('.filter-search');
+  if (searchInput) searchInput.addEventListener('input', () => {
+    root.dataset.query = searchInput.value;
+    const query = searchInput.value.trim().toLocaleLowerCase();
+    menu.querySelectorAll('.filter-options label').forEach(label => { label.hidden = Boolean(query) && !label.textContent.toLocaleLowerCase().includes(query); });
+  });
 }
 
 function initializeCatalogFilters() {
@@ -427,7 +434,7 @@ function aggregateResults() {
     const observations = (result.observations || []).filter(o => enabled.has(o.marketplace_key));
     const inStock = observations.filter(o => o.availability === 'IN_STOCK');
     const best = [...(inStock.length ? inStock : observations)].sort((a,b) => a.price_eur-b.price_eur)[0];
-    const complete = row.tasks.length && row.tasks.every(t => ['SUCCESS','NOT_FOUND'].includes(t.status) && t.coverage === 'complete');
+    const complete = row.tasks.length && row.tasks.every(t => ['SUCCESS','NOT_FOUND'].includes(t.status) && ['complete','reported_gap'].includes(t.coverage));
     row.shops[result.shop_key] = {...result, observations, price_eur:best?.price_eur, availability:best?.availability, price_basis:best?.price_basis,
       status:best ? 'SUCCESS' : complete ? 'NOT_LISTED' : 'UNVERIFIED', coverage:complete ? 'complete' : 'partial'};
     row.itemId = Number(result.item_id);
@@ -480,7 +487,7 @@ function lowestOffer(row, field) {
 function rowPriceValues(row) {
   const values = [];
   row.tasks.filter(task => task.status === 'SUCCESS').forEach(task => {
-    for (const offer of [task.cheapest_in_stock, task.cheapest_pre_order]) {
+    for (const offer of [task.cheapest_in_stock, task.cheapest_pre_order, task.lowest_reported, task.highest_reported]) {
       if (offer?.price_eur != null) values.push(Number(offer.price_eur));
     }
   });
@@ -511,9 +518,8 @@ function marketplaceCell(row, openDetails, maximum = false) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces:${maximum ? 'max' : 'min'}`;
   const summaries = row.tasks.map(task => {
-    const inStock = task[maximum ? 'highest_in_stock' : 'cheapest_in_stock'];
-    const offer = inStock || task[maximum ? 'highest_reported' : 'lowest_reported'];
-    const availabilityNote = offer && !inStock ? ` · reported price · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
+    const offer = task[maximum ? 'highest_reported' : 'lowest_reported'];
+    const availabilityNote = offer ? ` · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
     const coverageNote = task.coverage === 'reported_gap' ? ' · all visible offers collected; marketplace count differs' : task.coverage !== 'complete' ? ' · partial' : '';
     const note = availabilityNote + coverageNote;
     return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${escapeHtml(note)}</small></span>`;
@@ -521,7 +527,7 @@ function marketplaceCell(row, openDetails, maximum = false) {
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);
     const offers = (task.offers || []).map((offer, index) => `<div class="v5-offer">${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="offer-controls"><button type="button" class="link-action" data-correct-kind="marketplaces" data-correct-item="${task.item_id}" data-correct-source="${escapeHtml(task.marketplace_key)}" data-offer-index="${index}">Edit offer</button><button type="button" class="link-action danger" data-remove-offer="${index}" data-item="${task.item_id}" data-key="${escapeHtml(task.marketplace_key)}">Remove false match</button></span></div>`).join('');
-    const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured in-stock offers only';
+    const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured exact offers only';
     return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString(uiLocale())) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
   }).join('');
   return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
@@ -567,7 +573,7 @@ function buildResultFilters(rows) {
       options.filter(option => !known.has(option.value)).forEach(option => state.resultFilters[kind].add(option.value));
     }
     state.resultFilterKnown[kind] = new Set(options.map(option => option.value));
-    renderMultiFilter(`${kind}-filter`, options, state.resultFilters[kind], renderResults);
+    renderMultiFilter(`${kind}-filter`, options, state.resultFilters[kind], renderResults, 'No options', kind === 'model');
   }
   state.resultFilterInitialized = true;
 }
@@ -653,11 +659,9 @@ function renderActionRequired(run) {
     if (byId('action-dialog').open && !editing) byId('action-dialog').close();
     return;
   }
-  const signature = items.map(item => `${item.action_kind}:${item.item_id}:${item.action_key}`).sort().join('|');
-  if (run.status === 'COMPLETE' && signature !== state.lastActionSignature) {
-    state.lastActionSignature = signature;
-    if (!byId('action-dialog').open) byId('action-dialog').showModal();
-  }
+  // Review is intentionally user-opened. Reopening the application, language
+  // changes and history navigation must never interrupt the user with a modal.
+  state.lastActionSignature = items.map(item => `${item.action_kind}:${item.item_id}:${item.action_key}`).sort().join('|');
 }
 
 async function handleActionDialog(event) {
@@ -807,6 +811,20 @@ async function saveResultCorrection(status) {
   finally { buttons.forEach(button => { button.disabled = false; }); }
 }
 
+function renderQueueProgress(execution) {
+  const target = byId('queue-progress');
+  const batch = execution.queue_progress;
+  if (!batch?.marketplaces?.length) { target.innerHTML = ''; return; }
+  target.innerHTML = batch.marketplaces.map(row => {
+    const task = row.current && row.remaining
+      ? `${escapeHtml(row.current.model)} · ${escapeHtml(uiText(row.current.message))}`
+      : batch.stopped ? uiText('Stopped') : row.remaining ? uiText('Queued') : uiText('Completed');
+    const current = `${task} · ${escapeHtml(uiText(`Finished ${row.finished}/${row.total} · waiting ${row.queued} · checking ${row.running} · review ${row.needs_review}`))}`;
+    const eta = row.remaining && row.eta_seconds ? uiText(`ETA ${formatDuration(row.eta_seconds)}`) : `${row.finished}/${row.total}`;
+    return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
+  }).join('');
+}
+
 function renderRun(run) {
   const networkFailures = (run.tasks || []).filter(task => task.status === 'ACTION_REQUIRED' && (task.error_code === 'NETWORK_UNAVAILABLE' || task.error === 'All connection attempts failed'));
   byId('run-network-warning').hidden = !networkFailures.length;
@@ -827,6 +845,8 @@ function renderRun(run) {
     byId('start-run').disabled = false;
     byId('run-mode').disabled = false;
     byId('clear-run').disabled = true;
+    byId('retry-unresolved').disabled = true;
+    byId('retry-salidzini').disabled = true;
     byId('export-run').disabled = true;
     byId('stop-run').hidden = true;
     byId('stop-run').disabled = false;
@@ -847,10 +867,16 @@ function renderRun(run) {
   const eta = execution.eta_seconds == null ? '' : ` · ETA about ${formatDuration(execution.eta_seconds)}`;
   const queue = execution.total == null ? '' : ` · marketplace checks ${execution.finished || 0}/${execution.total}`;
   byId('progress-detail').textContent = `${mode[0].toUpperCase()}${mode.slice(1)} · ${execution.phase_label || (run.status === 'RUNNING' ? 'Monitoring sources' : 'Monitoring complete')}${queue}${eta}`;
+  const activity = execution.current_activity;
+  byId('progress-activity').textContent = activity ? `${activity.marketplace} · ${activity.model} · ${uiText(activity.message)}` : run.status === 'RUNNING' ? uiText('Preparing the next marketplace check…') : '';
+  renderQueueProgress(execution);
   const actionText = `${actionRequired ? ` · Action required ${actionRequired}` : ''}${cooldown ? ` · Cooldown ${cooldown}` : ''}${cached ? ` · Cached ${cached}` : ''}`;
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
+  const includeNotFound = byId('retry-include-not-found').checked;
+  const retryable = state.tasks.filter(task => ['ACTION_REQUIRED','FAILED','INCOMPLETE'].includes(task.status) || (includeNotFound && task.status === 'NOT_FOUND'));
+  const salidziniRetryable = retryable.some(task => task.marketplace_key === 'salidzini');
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('retry-unresolved').disabled = run.status === 'RUNNING' || !retryable.length; byId('retry-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('retry-marketplace').disabled = run.status === 'RUNNING'; byId('retry-limit').disabled = run.status === 'RUNNING'; byId('retry-include-not-found').disabled = run.status === 'RUNNING'; byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING') {
     if (state.runPoll) { clearTimeout(state.runPoll); state.runPoll = null; }
     if (previousStatus !== run.status) { loadExports(); loadMonitoringHistory(); }
@@ -893,12 +919,14 @@ async function loadMonitoringHistory() {
   try {
     const runs = await api('/monitoring-history?limit=20');
     byId('monitoring-history').classList.remove('muted');
-    byId('monitoring-history').innerHTML = runs.length ? runs.map(run => {
+    const renderHistoryRow = run => {
       const checks = Number(run.shop_checks || 0) + Number(run.assisted_checks || 0);
       const current = run.run_id === state.currentRunId ? ' current' : '';
       const mode = String(run.run_mode || 'balanced');
       return `<div class="history-row${current}"><div><strong>${escapeHtml(new Date(run.created_at).toLocaleString(uiLocale()))}</strong><span>${badge(run.status, statusClass(run.status))} · ${escapeHtml(mode[0].toUpperCase() + mode.slice(1))} · ${checks} marketplace checks</span></div><button type="button" class="compact secondary" data-open-run="${escapeHtml(run.run_id)}">${current ? 'Opened' : 'Open run'}</button></div>`;
-    }).join('') : '<span class="muted">No monitoring runs yet.</span>';
+    };
+    const recent = runs.slice(0, 3); const older = runs.slice(3);
+    byId('monitoring-history').innerHTML = runs.length ? `${recent.map(renderHistoryRow).join('')}${older.length ? `<details class="history-older"><summary>Show ${older.length} older runs</summary><div class="history-list">${older.map(renderHistoryRow).join('')}</div></details>` : ''}` : '<span class="muted">No monitoring runs yet.</span>';
   } catch (error) { byId('monitoring-history').classList.add('muted'); byId('monitoring-history').textContent = `History unavailable: ${error.message}`; }
   finally { state.historyLoading = false; }
 }
@@ -913,7 +941,7 @@ async function openHistoryRun(event) {
 }
 
 async function startRun() {
-  byId('start-run').disabled = true; byId('run-mode').disabled = true; byId('export-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.resultRenderSignature = ''; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
+  byId('start-run').disabled = true; byId('run-mode').disabled = true; byId('retry-unresolved').disabled = true; byId('export-run').disabled = true; state.stopRequested = false; state.resultFilterInitialized = false; state.resultRenderSignature = ''; state.lastActionSignature = ''; state.actionRenderSignature = ''; Object.values(state.resultFilters).forEach(filter => filter.clear()); Object.values(state.resultFilterKnown).forEach(filter => filter.clear());
   const mode = byId('run-mode').value;
   try { const result = await api('/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode }) }); await pollRun(result.run_id); await loadMonitoringHistory(); scheduleRunPolling(result.run_id); }
   catch (error) { byId('start-run').disabled = false; byId('run-mode').disabled = false; showBanner('error', error.message); }
@@ -945,6 +973,24 @@ async function clearCurrentTable() {
   } catch (error) {
     state.stopRequested = false; button.disabled = false; showBanner('error', error.message);
   } finally { button.textContent = 'Clear table'; }
+}
+
+async function retryUnresolved(marketplaceOverride = null) {
+  if (!state.currentRunId || byId('retry-unresolved').disabled) return;
+  const sourceKey = typeof marketplaceOverride === 'string' ? marketplaceOverride : byId('retry-marketplace').value;
+  const button = sourceKey === 'salidzini' ? byId('retry-salidzini') : byId('retry-unresolved');
+  const originalText = button.textContent; button.disabled = true; button.textContent = 'Retrying…';
+  try {
+    const result = await api(`/runs/${encodeURIComponent(state.currentRunId)}/retry-unresolved`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ include_not_found: byId('retry-include-not-found').checked,
+        marketplace_key: sourceKey, limit: Number(byId('retry-limit').value) })
+    });
+    showBanner('success', result.checks_started ? `${result.checks_started} unresolved checks queued.` : 'No unresolved checks matched the selected sources.');
+    await pollRun(state.currentRunId);
+    if (result.checks_started) scheduleRunPolling(state.currentRunId, 700);
+  } catch (error) { showBanner('error', error.message); }
+  finally { button.textContent = originalText; }
 }
 
 function exportCurrentRun() {
@@ -1019,7 +1065,7 @@ function wireEvents() {
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
   byId('workbook-file').addEventListener('change', event => updateFileName(event.target)); byId('stock-file').addEventListener('change', event => updateFileName(event.target));
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('retry-unresolved').addEventListener('click', () => retryUnresolved()); byId('retry-salidzini').addEventListener('click', () => retryUnresolved('salidzini')); byId('retry-include-not-found').addEventListener('change', () => { if (state.currentRunId) pollRun(state.currentRunId); }); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
   document.addEventListener('click', event => { if (!event.target.closest('.run-clear-control')) byId('clear-run-popover').hidden = true; });
   byId('run-mode').addEventListener('change', updateRunModeHelp);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));

@@ -59,7 +59,7 @@ def create_app(settings=None, store=None, transport=None):
 
     @app.get("/")
     async def index():
-        return FileResponse(Path(__file__).parent / "static/index.html")
+        return FileResponse(Path(__file__).parent / "static/index.html",headers={"Cache-Control":"no-store"})
 
     @app.get("/assets/{filename}")
     async def asset(filename: str):
@@ -262,12 +262,18 @@ def create_app(settings=None, store=None, transport=None):
             monitor.launch(run_id)
         return {"run_id":run_id,"status":"RUNNING"}
 
+    def run_payload(run_id: str):
+        result = catalog.run(run_id)
+        result.setdefault("execution", {})["current_activity"] = monitor.activity(run_id)
+        result["execution"]["queue_progress"] = monitor.progress(run_id)
+        return result
+
     @app.get("/runs/latest")
     async def latest():
         session = catalog.latest_monitoring_session()
         if not session:
             raise HTTPException(404,"No runs yet")
-        return catalog.run(session["run_id"])
+        return run_payload(session["run_id"])
 
     @app.get("/monitoring-history")
     async def history(limit: int=20):
@@ -275,7 +281,7 @@ def create_app(settings=None, store=None, transport=None):
 
     @app.get("/runs/{run_id}")
     async def run(run_id: str):
-        return catalog.run(run_id)
+        return run_payload(run_id)
 
     @app.post("/runs/{run_id}/stop")
     async def stop(run_id: str):
@@ -291,17 +297,26 @@ def create_app(settings=None, store=None, transport=None):
 
     @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/retry")
     async def retry(run_id: str,item_id: int,key: str):
+        task = catalog.check(run_id,item_id,key)
+        catalog.resume_monitoring_session(run_id)
+        monitor.begin_batch(run_id,[task],f"Retry {task['source_model']}")
         await monitor.retry(run_id,item_id,key,capture=bridge.connected)
         return {"status":"PENDING"}
 
     @app.post('/runs/{run_id}/marketplaces/{item_id}/{key}/open-collect')
     async def open_collect(run_id: str, item_id: int, key: str):
         async with start_lock:
+            task = catalog.check(run_id,item_id,key)
+            catalog.resume_monitoring_session(run_id)
+            monitor.begin_batch(run_id,[task],f"Open & collect {task['source_model']}")
             token = await monitor.retry(run_id,item_id,key,open_collect=True)
         return {'status':'PENDING', 'verification_id':token}
 
     @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/link")
     async def link(run_id: str,item_id: int,key: str,payload: dict=Body(...)):
+        task = catalog.check(run_id,item_id,key)
+        catalog.resume_monitoring_session(run_id)
+        monitor.begin_batch(run_id,[task],f"Parse link for {task['source_model']}")
         await monitor.retry(run_id,item_id,key,url=marketplace_url(key,payload.get("url")),capture=bridge.connected)
         return {"status":"PENDING"}
 
@@ -324,12 +339,49 @@ def create_app(settings=None, store=None, transport=None):
     @app.post("/runs/{run_id}/models/{item_id}/retry")
     async def retry_model(run_id: str,item_id: int):
         enabled = {s["key"] for s in catalog.list_sources() if s["effective_enabled"]}
+        tasks = [task for task in catalog.checks(run_id)
+                 if task["item_id"]==item_id and task["marketplace_key"] in enabled]
+        if tasks:
+            catalog.resume_monitoring_session(run_id)
+            monitor.begin_batch(run_id,tasks,f"Retry model {tasks[0]['source_model']}")
         count = 0
-        for task in catalog.checks(run_id):
-            if task["item_id"]==item_id and task["marketplace_key"] in enabled:
-                await monitor.retry(run_id,item_id,task["marketplace_key"],capture=False)
-                count += 1
+        for task in tasks:
+            await monitor.retry(run_id,item_id,task["marketplace_key"],capture=False)
+            count += 1
         return {"checks_started":count,"status":"PENDING"}
+
+    @app.post("/runs/{run_id}/retry-unresolved")
+    async def retry_unresolved(run_id: str, payload: dict=Body(default={})):
+        include_not_found = bool(payload.get("include_not_found"))
+        source_key = str(payload.get("marketplace_key") or "all")
+        if source_key not in {"all", "kaina24", "salidzini", "hinnavaatlus"}:
+            raise ValueError("Choose a valid marketplace retry filter")
+        try:
+            limit = int(payload.get("limit") or 10)
+        except (TypeError, ValueError):
+            raise ValueError("Retry batch size must be 5, 10, 25 or all")
+        if limit not in {5, 10, 25, 10000}:
+            raise ValueError("Retry batch size must be 5, 10, 25 or all")
+        if any(ident[0] == run_id for ident in monitor.jobs):
+            raise HTTPException(409,"A retry batch is already running")
+        enabled = {s["key"] for s in catalog.list_sources() if s["effective_enabled"]}
+        statuses = {"ACTION_REQUIRED", "FAILED", "INCOMPLETE"}
+        if include_not_found:
+            statuses.add("NOT_FOUND")
+        tasks = [task for task in catalog.checks(run_id)
+                 if task["marketplace_key"] in enabled and task.get("status") in statuses
+                 and source_key in {"all",task["marketplace_key"]}]
+        priority = {"ACTION_REQUIRED": 0, "FAILED": 1, "INCOMPLETE": 2, "NOT_FOUND": 3}
+        tasks.sort(key=lambda task:(priority.get(task.get("status"),9),task["source_model"],task["marketplace_key"]))
+        tasks = tasks[:limit]
+        if tasks:
+            catalog.resume_monitoring_session(run_id)
+            monitor.begin_batch(run_id,tasks,"Retry unresolved" if source_key == "all" else f"Retry {tasks[0]['marketplace']}")
+        count = 0
+        for task in tasks:
+            await monitor.retry(run_id, task["item_id"], task["marketplace_key"], capture=False)
+            count += 1
+        return {"checks_started": count, "status": "PENDING" if count else "UNCHANGED"}
 
     @app.get("/runs/{run_id}/export")
     async def export(run_id: str):
