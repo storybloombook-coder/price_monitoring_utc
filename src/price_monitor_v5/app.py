@@ -70,7 +70,11 @@ def create_app(settings=None, store=None, transport=None):
     @app.get("/health")
     async def health():
         return {"status":"ok","application":"Price Monitor v5","version":__version__,"legacy_service":"disabled · marketplace-only v5",
-                "browser_bridge":bridge.status(),"polite_monitoring":{"delay_seconds":[3,3],"cache_ttl_seconds":14400,"negative_cache_ttl_seconds":0,"cooldown_seconds":600,"browser_concurrency":1}}
+                "browser_bridge":bridge.status(),"polite_monitoring":{"delay_seconds":[3,3],
+                    "salidzini_browser_delay_seconds":monitor.salidzini_delay,
+                    "salidzini_page_timeout_seconds":30,"salidzini_circuit_breaker_failures":2,
+                    "cache_ttl_seconds":14400,"negative_cache_ttl_seconds":0,
+                    "cooldown_seconds":600,"browser_concurrency":1}}
 
     @app.get("/browser-bridge/status")
     async def bridge_status():

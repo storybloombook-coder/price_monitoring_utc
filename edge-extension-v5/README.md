@@ -1,8 +1,12 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.13
+# PriceMonitor v5 Marketplace Bridge · 5.0.14
 
-In 5.0.13, Salidzini Auto recognizes additional Latvian empty-result layouts,
-uses a 12-second bounded readiness window, and closes its extension-owned tab
-after PriceMonitor Hard stop. User-opened verification tabs remain untouched.
+In 5.0.14, Salidzini Auto spaces navigations by at least 12 seconds, waits up to
+30 seconds for a stable result page and accepts both `item_box_main` and
+`item_box_sub` layouts. CAPTCHA pauses the whole current batch immediately;
+two consecutive unavailable pages also pause it before more marketplace
+requests are sent. The retained tab can be verified manually, then an explicit
+small retry batch starts a fresh guarded attempt. The extension never solves or
+bypasses CAPTCHA, and trusted site cookies should not be cleared.
 
 ## Open & collect
 

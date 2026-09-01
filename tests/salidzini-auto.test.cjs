@@ -13,7 +13,8 @@ function harness() {
     salidziniPage:value=>{const u=new URL(value); if(u.hostname!=='www.salidzini.lv'||u.pathname!=='/cena')throw Error('wrong page');return u.href;},
     bridgeFetch:async()=>({ok:true,json:async()=>({jobs:alive?[{id:'a'},{id:'b'}]:[]})}),
     snapshot:async id=>({url:changedUrl?'https://shop.test/':tabs.get(id).url,html:'real DOM snapshot',security_challenge:challenge,
-      salidzini_ready:ready,salidzini_fingerprint:'cards',incomplete:false}),
+      salidzini_ready:ready,salidzini_fingerprint:'cards',salidzini_card_count:ready?2:0,
+      page_text_length:ready?500:0,ready_state:'complete',title:'Salidzini results',incomplete:false}),
     finishJob:async(id,record,payload,close)=>{results.push({id,record,payload,close});delete storage.activeJobs[id];},
     chrome:{storage:{local},alarms:{clear:async()=>{},create:async()=>{}},declarativeNetRequest:{updateSessionRules:async()=>{}},tabs:{
       get:async id=>{if(!tabs.has(id))throw Error('closed');return {...tabs.get(id)};},
@@ -27,7 +28,7 @@ function harness() {
   const start=id=>run(`acceptAutomaticSalidzini({id:'${id}',shop_key:'salidzini',model:'115RM9L',url:'${URL1}',automatic:true})`);
   const inspect=id=>run(`inspectAutomaticSalidzini('${id}', ${JSON.stringify(storage.activeJobs[id])})`);
   return {storage,tabs,navigations,results,start,inspect,setAlive:v=>alive=v,setChallenge:v=>challenge=v,setReady:v=>ready=v,
-    expire:()=>clock+=13000,setChangedUrl:v=>changedUrl=v,setApp:v=>appUrl=v};
+    expire:()=>clock+=31000,setChangedUrl:v=>changedUrl=v,setApp:v=>appUrl=v};
 }
 test('automatically captures stable results, reuses one tab, requires no popup clicks',async()=>{
   const h=harness();await h.start('a');assert.equal(h.tabs.size,1);assert.equal(h.tabs.get(1).active,false);
@@ -52,6 +53,7 @@ test('repurposed owned tab is left alone and a new one is used',async()=>{
 test('unknown readiness times out instead of endless checking',async()=>{
   const h=harness();await h.start('a');h.setReady(false);await h.inspect('a');h.expire();await h.inspect('a');
   assert.match(h.results[0].payload.error,/did not become ready/);assert.equal(h.results[0].payload.security_challenge,false);
+  assert.equal(JSON.stringify(h.results[0].payload.page_diagnostics),JSON.stringify({title:'Salidzini results',ready_state:'complete',card_count:0,text_length:0,fingerprint:'cards'}));
 });
 test('redirected page and changed app origin cannot submit scraped data',async()=>{
   const h=harness();await h.start('a');h.setChangedUrl(true);await h.inspect('a');assert.match(h.results[0].payload.error,/redirected/);

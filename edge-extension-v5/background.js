@@ -83,10 +83,20 @@ function extractRenderedPage(model) {
   const clone = document.documentElement.cloneNode(true);
   clone.querySelectorAll('script:not([type="application/ld+json"]), style, svg, noscript, input, textarea, select, iframe').forEach(node => node.remove());
   const html = clone.outerHTML;
-  const cards = [...document.querySelectorAll('.item_box_main')];
+  // Salidzini currently serves both outer and inner card layouts. Prefer the
+  // outer cards to avoid duplicates, but accept inner-only pages as ready.
+  const mainCards = [...document.querySelectorAll('.item_box_main')];
+  const cards = mainCards.length ? mainCards : [...document.querySelectorAll('.item_box_sub')];
   const empty = /\b0\s+preces?\b|nekas netika atrasts|preces? nav atrastas?|nav atrasta neviena prece|meklēšanas rezultāti nav atrasti|nav meklēšanas rezultātu|\b0\s+rezultāti\b/i.test(text) ||
     Boolean(document.querySelector('.no-results, .search-no-results, .search_no_results, #no-results, #no_results'));
-  const fingerprint = cards.map(n => n.innerText).join('|');
+  // Use stable offer evidence rather than all visible text. Delivery clocks,
+  // adverts and stock labels can update while the seller prices are complete.
+  const fingerprint = cards.map(node => {
+    const link = node.querySelector('.item_link')?.getAttribute('href') || '';
+    const seller = node.querySelector('.item_shop_name, .shop_name, .seller-name')?.textContent?.trim() || '';
+    const price = node.querySelector('.item_price, .price, .offer-price')?.textContent?.trim() || '';
+    return `${link}|${seller}|${price}`;
+  }).join('||');
   const resultNodes=[...document.querySelectorAll('.product-item-h-wrap, .seller-item-table, tr.offer, .product-name')];
   // Ads/clocks outside the offer list must not prevent stable result detection.
   const resultText=resultNodes.length ? (document.querySelector('h1')?.innerText||'')+'|'+resultNodes.map(n=>n.innerText).join('|') : text;
@@ -96,6 +106,8 @@ function extractRenderedPage(model) {
     security_challenge: securityChallenge, incomplete: html.length > 7900000,
     salidzini_ready: document.readyState === 'complete' && (cards.length > 0 || empty),
     salidzini_fingerprint: fingerprint || (empty ? 'empty' : ''),
+    salidzini_card_count: cards.length, page_text_length: text.length,
+    ready_state: document.readyState,
     page_ready:document.readyState==='complete' && text.trim().length>50,
     page_fingerprint:String(textHash>>>0) };
 }

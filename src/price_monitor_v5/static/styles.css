@@ -229,6 +229,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .queue-progress-row { display: grid; grid-template-columns: minmax(100px, 145px) minmax(110px, 1fr) auto; gap: 10px; align-items: center; padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 11px; }
 .queue-progress-row strong { color: var(--text); }
 .queue-progress-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.queue-progress-current .queue-protection { display: block; overflow: hidden; text-overflow: ellipsis; color: #9a5b08; font-weight: 700; }
 .queue-progress-eta { white-space: nowrap; color: var(--brand); font-weight: 700; }
 .footer-grid { margin-top: 18px; }
 .run-history { margin-top: 18px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); }

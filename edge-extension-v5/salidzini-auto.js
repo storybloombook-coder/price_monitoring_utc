@@ -1,5 +1,5 @@
 // One owned tab, bounded loading, no CAPTCHA clicks and no retailer navigation.
-const SALIDZINI_AUTO_TIMEOUT = 12000;
+const SALIDZINI_AUTO_TIMEOUT = 30000;
 const salidziniTimers = new Map();
 
 function sameSalidziniSearch(first, second) {
@@ -61,6 +61,7 @@ async function acceptAutomaticSalidzini(job) {
 
 async function inspectAutomaticSalidzini(jobId, record) {
   const expired = Date.now()-record.startedAt >= SALIDZINI_AUTO_TIMEOUT;
+  let captured = null;
   try {
     if (!await automaticJobAlive(record)) {
       await discardAutomaticJob(jobId,record);
@@ -78,7 +79,7 @@ async function inspectAutomaticSalidzini(jobId, record) {
       if (!expired) { salidziniLater(jobId); return; }
       throw new Error('Page loading timed out');
     }
-    const captured = await snapshot(record.tabId,record.job.model);
+    captured = await snapshot(record.tabId,record.job.model);
     if (captured.security_challenge) {
       await chrome.tabs.update(record.tabId,{active:true});
       await finishJob(jobId,record,{...captured,error:'CAPTCHA detected. Complete it manually in this tab'},false);
@@ -97,6 +98,14 @@ async function inspectAutomaticSalidzini(jobId, record) {
     await finishJob(jobId,record,captured,false); // Retain the owned tab for the next page/SKU.
   } catch (error) {
     if (!expired && /fetch|network|active PriceMonitor/i.test(String(error.message))) { salidziniLater(jobId); return; }
-    await finishJob(jobId,record,{url:record.job.url,html:'',error:String(error.message),security_challenge:false},false);
+    const pageDiagnostics = captured ? {
+      title:String(captured.title || '').slice(0,200),
+      ready_state:captured.ready_state || '',
+      card_count:Number(captured.salidzini_card_count || 0),
+      text_length:Number(captured.page_text_length || 0),
+      fingerprint:String(captured.salidzini_fingerprint || '').slice(0,500),
+    } : null;
+    await finishJob(jobId,record,{url:record.job.url,html:'',error:String(error.message),security_challenge:false,
+      page_diagnostics:pageDiagnostics},false);
   }
 }

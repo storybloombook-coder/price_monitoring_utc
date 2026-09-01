@@ -17,6 +17,10 @@ class MarketplaceMonitor:
     """One polite queue per marketplace; stores immutable run/model snapshots."""
     def __init__(self, store, bridge, *, delay=3, transport=None):
         self.store, self.bridge, self.delay, self.transport = store, bridge, delay, transport
+        # Browser automation must be materially gentler than the lightweight
+        # server-side marketplace readers.  ``delay=0`` remains the explicit
+        # test hook used by the isolated regression suite.
+        self.salidzini_delay = 0 if delay == 0 else max(12, delay)
         self.jobs = {}
         self.locks = {s.key: asyncio.Lock() for s in MARKETPLACES}
         self.last_request = {}
@@ -26,6 +30,7 @@ class MarketplaceMonitor:
         self.activities = {}
         self.batches = {}
         self.verification_jobs = {}
+        self.salidzini_health = {}
 
     def launch(self, run_id):
         tasks = [task for task in self.store.checks(run_id) if task["status"] == "PENDING"]
@@ -42,6 +47,42 @@ class MarketplaceMonitor:
             "stopped": False,
         }
         self.activities[run_id] = {}
+        # An explicit new run/retry is the user's signal that the retained
+        # browser tab has been inspected and the session may be tried again.
+        self.salidzini_health[run_id] = {
+            "consecutive_unavailable": 0,
+            "paused": False,
+            "reason": None,
+        }
+
+    def salidzini_state(self, run_id):
+        return self.salidzini_health.setdefault(run_id, {
+            "consecutive_unavailable": 0,
+            "paused": False,
+            "reason": None,
+        })
+
+    def pause_salidzini(self, run_id, reason):
+        state = self.salidzini_state(run_id)
+        state.update(paused=True, reason=reason)
+
+    def record_salidzini_capture(self, run_id, result):
+        """Pause a batch before repeated blank/protected pages create a block."""
+        state = self.salidzini_state(run_id)
+        if result.get("security_challenge"):
+            self.pause_salidzini(run_id, "CAPTCHA or browser security challenge")
+            return
+        message = str(result.get("error") or "")
+        unavailable = any(marker in message.lower() for marker in (
+            "results did not become ready", "page loading timed out",
+            "could not read the retailer page", "search page changed or redirected",
+        ))
+        if unavailable:
+            state["consecutive_unavailable"] += 1
+            if state["consecutive_unavailable"] >= 2:
+                self.pause_salidzini(run_id, "two consecutive unavailable result pages")
+        elif not message:
+            state.update(consecutive_unavailable=0, reason=None)
 
     def schedule(self, task, capture=False):
         ident = (task["run_id"], task["item_id"], task["marketplace_key"])
@@ -81,12 +122,15 @@ class MarketplaceMonitor:
             needs_review = sum(status in {"ACTION_REQUIRED","FAILED","INCOMPLETE"} for status in statuses)
             estimate = round((elapsed / finished) * remaining) if finished and remaining else 0
             event = self.activities.get(run_id, {}).get(key)
+            guard = self.salidzini_health.get(run_id, {}) if key == "salidzini" else {}
             rows.append({
                 "marketplace_key": key,
                 "marketplace": next((source.name for source in MARKETPLACES if source.key == key), key),
                 "total": len(ids), "finished": finished, "remaining": remaining,
                 "queued": queued, "running": running, "needs_review": needs_review,
                 "eta_seconds": estimate, "current": event,
+                "protection_paused": bool(guard.get("paused")),
+                "protection_reason": guard.get("reason"),
             })
         return {"label": batch["label"], "started_at": batch["started_at"],
                 "stopped": batch.get("stopped", False), "marketplaces": rows}
@@ -134,6 +178,8 @@ class MarketplaceMonitor:
         verification = self.verification_jobs.get(ident)
         try:
             async with self.locks[key]:
+                task.pop("automation_paused", None)
+                task.pop("page_diagnostics", None)
                 if verification:
                     capture = True
                 if not verification and key == 'salidzini' and task.get('salidzini_mode') == 'manual':
@@ -141,6 +187,10 @@ class MarketplaceMonitor:
                 if automatic and not verification:
                     if not self.bridge.connected or not getattr(self.bridge, 'automatic_salidzini', False):
                         raise ReviewRequired('Salidzini Auto needs the connected v5.0.8+ extension. Reload/connect it, then retry; manual page capture remains available.')
+                    state = self.salidzini_state(task["run_id"])
+                    if state["paused"]:
+                        task["automation_paused"] = True
+                        raise ReviewRequired('Salidzini Auto paused this batch to protect the browser session after CAPTCHA or repeated unavailable pages. No request was sent for this SKU. Complete the CAPTCHA in the retained tab, then retry Salidzini in a batch of 5.')
                     capture = True
                 if self.blocked(key) and not capture:
                     raise ReviewRequired("Automatic requests are cooling down. Manual offer entry and browser capture are available now.")
@@ -236,7 +286,8 @@ class MarketplaceMonitor:
                     verification = task.get('verification_id')
                     if automatic or verification:
                         pace_key = key + '-browser'
-                        wait = self.delay - (time.monotonic() - self.last_request.get(pace_key, 0))
+                        pace = self.salidzini_delay if automatic else self.delay
+                        wait = pace - (time.monotonic() - self.last_request.get(pace_key, 0))
                         if wait > 0:
                             await asyncio.sleep(wait)
                         self.last_request[pace_key] = time.monotonic()
@@ -246,6 +297,14 @@ class MarketplaceMonitor:
                             result = await self.bridge.capture(key,model,url,automatic=True)
                     else:
                         result = await self.bridge.capture(key,model,url)
+                    if automatic:
+                        task["page_diagnostics"] = result.get("page_diagnostics") or {
+                            "title": result.get("title"),
+                            "ready_state": result.get("ready_state"),
+                            "card_count": result.get("salidzini_card_count"),
+                            "text_length": result.get("page_text_length"),
+                        }
+                        self.record_salidzini_capture(task["run_id"], result)
                     if result.get("security_challenge") or result.get("error"):
                         raise ReviewRequired(result.get("error") or "Complete the marketplace CAPTCHA before capturing")
                     content, final = result.get("html", ""), marketplace_url(key,result.get("url") or url)

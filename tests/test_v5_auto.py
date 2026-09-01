@@ -31,6 +31,12 @@ class FakeBridge:
         return {'html': result, 'url': url} if isinstance(result,str) else result
 
 
+def test_production_salidzini_browser_pacing_is_gentler_than_direct_sources(tmp_path):
+    store=CatalogStore(tmp_path/'db')
+    assert MarketplaceMonitor(store,FakeBridge(REAL_COUNTED)).salidzini_delay == 12
+    assert MarketplaceMonitor(store,FakeBridge(REAL_COUNTED),delay=0).salidzini_delay == 0
+
+
 async def collect(store, bridge, model='115RM9L', run='auto', delay=0):
     item = store.create_item('source', {'model':model})
     store.begin_run(run,'deep')
@@ -108,15 +114,49 @@ def test_small_marketplace_heading_gap_saves_visible_offers_without_cache(tmp_pa
     asyncio.run(scenario())
 
 
-def test_captcha_marks_only_its_sku_and_queue_continues(tmp_path):
+def test_captcha_pauses_remaining_auto_batch_without_opening_more_pages(tmp_path):
     async def scenario():
-        store=CatalogStore(tmp_path/'db'); store.create_item('source',{'model':'25G64'});store.create_item('source',{'model':'32S4K'})
+        store=CatalogStore(tmp_path/'db')
+        for model in ('25G64','32S4K','55C6K'):
+            store.create_item('source',{'model':model})
         store.begin_run('one','deep');bridge=FakeBridge({'html':'','security_challenge':True,'error':'CAPTCHA'})
         monitor=MarketplaceMonitor(store,bridge,delay=0)
-        for task in store.checks('one'):
-            if task['marketplace_key']=='salidzini': monitor.schedule(task)
+        sal_tasks=[task for task in store.checks('one') if task['marketplace_key']=='salidzini']
+        monitor.begin_batch('one',sal_tasks,'Full monitoring run')
+        for task in sal_tasks: monitor.schedule(task)
         await asyncio.gather(*list(monitor.jobs.values()))
-        assert len(bridge.urls)==2 and all(t['status']=='ACTION_REQUIRED' for t in store.checks('one') if t['marketplace_key']=='salidzini')
+        tasks=[t for t in store.checks('one') if t['marketplace_key']=='salidzini']
+        assert len(bridge.urls)==1 and all(t['status']=='ACTION_REQUIRED' for t in tasks)
+        assert sum(bool(t.get('automation_paused')) for t in tasks)==2
+        assert all('No request was sent' in t['error'] for t in tasks if t.get('automation_paused'))
+        progress=monitor.progress('one')['marketplaces'][0]
+        assert progress['protection_paused'] and 'CAPTCHA' in progress['protection_reason']
+    asyncio.run(scenario())
+
+
+def test_two_unavailable_pages_trip_guard_and_explicit_batch_resets_it(tmp_path):
+    async def scenario():
+        store=CatalogStore(tmp_path/'db')
+        for model in ('25G64','32S4K','55C6K','65C6K'):
+            store.create_item('source',{'model':model})
+        store.begin_run('one','deep')
+        bridge=FakeBridge({'html':'','error':'Results did not become ready; inspect the page manually',
+                           'page_diagnostics':{'card_count':0,'text_length':0}})
+        monitor=MarketplaceMonitor(store,bridge,delay=0)
+        sal_tasks=[t for t in store.checks('one') if t['marketplace_key']=='salidzini']
+        monitor.begin_batch('one',sal_tasks,'Full monitoring run')
+        for task in sal_tasks: monitor.schedule(task)
+        await asyncio.gather(*list(monitor.jobs.values()))
+        tasks=[t for t in store.checks('one') if t['marketplace_key']=='salidzini']
+        assert len(bridge.urls)==2
+        assert sum(bool(t.get('automation_paused')) for t in tasks)==2
+        assert tasks[1]['page_diagnostics']['card_count']==0
+
+        retry=[tasks[2]]
+        monitor.begin_batch('one',retry,'Retry Salidzini')
+        await monitor.retry('one',retry[0]['item_id'],'salidzini')
+        await asyncio.gather(*list(monitor.jobs.values()))
+        assert len(bridge.urls)==3
     asyncio.run(scenario())
 
 

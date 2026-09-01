@@ -17,6 +17,7 @@ test('Russian translates static controls, tooltips and confirmations', () => {
   assert.ok(Object.keys(RU).length > 150);
   assert.equal(translateText('How this marketplace is collected', 'ru'), 'Как происходит сбор информации');
   assert.match(translateText('Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.', 'ru'), /Поиск выполняется по TCL \+ модели/);
+  assert.match(translateText('Salidzini Auto paused this batch to protect the browser session after CAPTCHA or repeated unavailable pages. No request was sent for this SKU. Complete the CAPTCHA in the retained tab, then retry Salidzini in a batch of 5.', 'ru'), /Запрос по этому SKU не отправлялся/);
 });
 
 test('Russian translates live counters without touching SKU and price data', () => {
@@ -30,16 +31,16 @@ test('Russian translates live counters without touching SKU and price data', () 
 });
 
 test('Russian translates the engine-ready location requested for the toggle', () => {
-  assert.equal(translateText('v5.0.13 · marketplace engine ready', 'ru'), 'v5.0.13 · движок маркетплейсов готов');
+  assert.equal(translateText('v5.0.14 · marketplace engine ready', 'ru'), 'v5.0.14 · движок маркетплейсов готов');
   assert.equal(translateText('v5: only Kaina24, Salidzini and Hinnavaatlus are queried. Shop columns are derived from marketplace offers.', 'ru'), 'v5: запрашиваются только Kaina24, Salidzini и Hinnavaatlus. Столбцы магазинов формируются из предложений маркетплейсов.');
 });
 
 test('HTML loads localization before application code and exposes both language buttons', () => {
   const html = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/index.html'), 'utf8');
-  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.13') < html.indexOf('/assets/app.js?v=5.0.13'));
+  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.14') < html.indexOf('/assets/app.js?v=5.0.14'));
   assert.match(html, /data-language="en"/);
   assert.match(html, /data-language="ru"/);
-  assert.match(html, /Price Monitor v5\.0\.13/);
+  assert.match(html, /Price Monitor v5\.0\.14/);
   const script = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/i18n.js'), 'utf8');
   assert.match(script, /typeof window === 'undefined'/);
   assert.match(script, /searchParams\.set\('lang', next\)/);

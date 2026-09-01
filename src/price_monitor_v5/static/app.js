@@ -38,7 +38,7 @@ const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not 
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
   hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
-  salidzini: 'Auto uses the connected v5.0.8+ extension and one working tab, reads all result pages with pauses and finishes only after exact listings match the reported count. Geedo recommendations are excluded. CAPTCHA pauses the browser queue for manual verification. Manual mode sends no automatic requests: use Send to PriceMonitor, review and mark all pages reviewed to finish. No retailer pages are opened.'
+  salidzini: 'Auto uses the connected extension and one persistent working tab. Salidzini requests are spaced by at least 12 seconds and a page may stabilize for up to 30 seconds. CAPTCHA pauses the whole automatic batch immediately; two consecutive unavailable pages do the same before more requests are sent. Complete the check in the retained tab, then retry a batch of 5. Manual mode sends no automatic requests. No retailer pages are opened.'
 };
 function parsingInfo(key, label = key) {
   const help = PARSING_HELP[key] ? [PARSING_HELP[key], SEARCH_FALLBACK_HELP].map(uiText).join('') : null;
@@ -821,7 +821,8 @@ function renderQueueProgress(execution) {
       : batch.stopped ? uiText('Stopped') : row.remaining ? uiText('Queued') : uiText('Completed');
     const current = `${task} · ${escapeHtml(uiText(`Finished ${row.finished}/${row.total} · waiting ${row.queued} · checking ${row.running} · review ${row.needs_review}`))}`;
     const eta = row.remaining && row.eta_seconds ? uiText(`ETA ${formatDuration(row.eta_seconds)}`) : `${row.finished}/${row.total}`;
-    return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
+    const protection = row.protection_paused ? `<span class="queue-protection">${escapeHtml(uiText('Protection pause · no more automatic requests in this batch'))}</span>` : '';
+    return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}${protection}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
   }).join('');
 }
 
@@ -1077,7 +1078,7 @@ async function initialize() {
   wireEvents();
   try {
     const [health] = await Promise.all([api('/health'), loadSources()]); byId('service-state').textContent = `v${health.version} · marketplace engine ready`; byId('service-state').classList.add('ok');
-    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = 'Marketplace-only · 1 request per marketplace at a time · 3 s pacing · 4 h complete-price cache · manual entry available during protection cooldown';
+    const policy = health.polite_monitoring; if (policy) byId('polite-mode-state').textContent = 'Marketplace-only · 1 request per marketplace at a time · 3 s Kaina/Hinnavaatlus · 12 s Salidzini · automatic protection pause · manual entry available';
     await Promise.all([loadCatalog(), loadSetupStatus(), loadExports(), loadLogs(), loadBrowserBridge(), loadMonitoringHistory()]); try { const latest = await api('/runs/latest'); renderRun(latest); if (latest.status === 'RUNNING') scheduleRunPolling(latest.id || latest.run_id); await loadMonitoringHistory(); } catch { renderResults(); }
     setInterval(loadLogs, 10000); setInterval(loadBrowserBridge, 5000);
   } catch (error) { byId('service-state').textContent = 'Startup error'; showBanner('error', error.message); }

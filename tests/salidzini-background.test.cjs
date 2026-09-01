@@ -20,6 +20,9 @@ test('worker imports both capture modules and queues WebSocket jobs behind clean
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(vm.runInContext('typeof acceptAutomaticSalidzini',ctx),'function');
   assert.equal(vm.runInContext('typeof handlePageCapture',ctx),'function');
+  const source=fs.readFileSync('edge-extension-v5/background.js','utf8');
+  assert.match(source,/querySelectorAll\('\.item_box_sub'\)/);
+  assert.match(source,/salidzini_card_count: cards\.length/);
   storage.activeJobs={old:{job:{id:'old'}}};
   let release;
   ctx.cleanupGate=new Promise(resolve=>release=resolve);
