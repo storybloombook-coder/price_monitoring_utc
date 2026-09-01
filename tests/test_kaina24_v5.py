@@ -69,6 +69,16 @@ def test_product_rows_ignore_mobile_duplicates_recommendations_and_other_models(
     assert not parse_page("kaina24", "27G64", html, URL)["offers"]
 
 
+def test_exact_product_heading_authorizes_abbreviated_current_seller_titles():
+    html = product(seller_row('Elesen.lt', '12999', model='RM9L, 115'), count=1)
+    html = html.replace('Monitorius TCL 24G54 kaina', 'Televizorius TCL 115RM9L kaina')
+    result = parse_page('kaina24', '115RM9L', html, 'https://www.kaina24.lt/p/tcl-115rm9l/')
+    assert result['offers'][0]['store'] == 'Elesen.lt'
+    assert result['offers'][0]['price_eur'] == 12999
+    assert result['coverage_url'] == 'https://www.kaina24.lt/p/tcl-115rm9l/'
+    assert not result['partial']
+
+
 @pytest.mark.parametrize("model", ["24G54 Pro", "27G54", "124G54", "24G54 remote control"])
 def test_wrong_models_do_not_leak_from_search_or_product_title(model):
     assert not parse(card(model=model), SEARCH_URL)["offers"]

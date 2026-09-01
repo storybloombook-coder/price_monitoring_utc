@@ -77,11 +77,23 @@ def test_pagination_counts_listings_not_deduplicated_sellers(tmp_path):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('html', [REAL_CARDS, REAL_COUNTED.replace('3 preces','4 preces'), REAL_COUNTED.replace('12999,00','bad price',1)])
+@pytest.mark.parametrize('html', [REAL_CARDS, REAL_COUNTED.replace('3 preces','6 preces'), REAL_COUNTED.replace('12999,00','bad price',1)])
 def test_unproven_coverage_stays_in_review_with_prices(tmp_path,html):
     async def scenario():
         _,task=await collect(CatalogStore(tmp_path/'db'),FakeBridge(html))
         assert task['offers'] and task['status']=='ACTION_REQUIRED' and 'coverage' in task['error']
+    asyncio.run(scenario())
+
+
+def test_small_marketplace_heading_gap_saves_visible_offers_without_cache(tmp_path):
+    async def scenario():
+        store=CatalogStore(tmp_path/'db')
+        _,task=await collect(store,FakeBridge(REAL_COUNTED.replace('3 preces','4 preces')))
+        assert task['status']=='SUCCESS' and task['coverage']=='reported_gap'
+        assert task['coverage_detail'].startswith('3 verified listings / 4 reported')
+        assert store.cached_check('115RM9L','salidzini',4) is None
+        run=store.run('auto')
+        assert next(s for s in run['shop_results'] if s['shop_key']=='bite')['status']=='UNVERIFIED'
     asyncio.run(scenario())
 
 

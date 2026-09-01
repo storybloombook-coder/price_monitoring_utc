@@ -294,7 +294,10 @@ def parse_page(key, model, content, page_url):
             if matched_model(key, model, evidence):
                 if seller and money:
                     cash = money.text()
-                    if key == 'salidzini' and not re.fullmatch(r'\s*(?:€|EUR)?\s*\d+(?:[ .]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR)?\s*', cash, re.I):
+                    # A cash offer may explicitly state Latvian zero-rate VAT
+                    # after the price. Keep rejecting delivery, installments or
+                    # any second amount, but do not discard "111,83 € PVN 0%".
+                    if key == 'salidzini' and not re.fullmatch(r'\s*(?:€|EUR)?\s*\d+(?:[ .]\d{3})*(?:[.,]\d{1,2})?\s*(?:€|EUR)?(?:\s*PVN\s*0\s*%)?\s*', cash, re.I):
                         rejected += 1
                         continue
                     raw = {"store": seller.text(), "price_eur": price(cash), "title": evidence,

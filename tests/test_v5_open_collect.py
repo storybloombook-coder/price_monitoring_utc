@@ -77,6 +77,18 @@ def test_partial_capture_keeps_prices_but_never_authorizes_closure(tmp_path):
     asyncio.run(scenario())
 
 
+def test_all_visible_offers_with_small_reported_count_gap_closes_tab(tmp_path):
+    async def scenario():
+        store,item,bridge,monitor=setup(tmp_path)
+        token=await monitor.retry('one',item['id'],'salidzini',open_collect=True)
+        await reply(bridge,REAL_COUNTED.replace('3 preces','4 preces'))
+        await asyncio.gather(*monitor.jobs.values())
+        task=store.check('one',item['id'],'salidzini')
+        assert task['status']=='SUCCESS' and task['coverage']=='reported_gap'
+        assert bridge.verification(token)['state']=='complete'
+    asyncio.run(scenario())
+
+
 def test_pagination_receipt_waits_for_last_page(tmp_path):
     async def scenario():
         store,item,bridge,monitor=setup(tmp_path)

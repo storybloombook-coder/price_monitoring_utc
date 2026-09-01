@@ -191,6 +191,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 78%, transparen
 .switch-row input:focus-visible + .switch { outline: 3px solid color-mix(in srgb, var(--brand) 25%, transparent); }
 .switch-row:active .switch { transform: scale(.96); }
 .run-actions { margin-bottom: 12px; }
+.run-clear-control { flex: 0 0 auto; }
+.run-clear-control .action-popover { width: 300px; }
 .run-mode-control { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 750; }
 .run-mode-control select { width: auto; min-width: 112px; padding: 7px 28px 7px 9px; font-weight: 700; }
 .run-mode-help { margin: -5px 0 10px; color: var(--muted); font-size: 11px; }

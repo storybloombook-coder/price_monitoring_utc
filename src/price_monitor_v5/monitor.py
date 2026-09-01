@@ -127,7 +127,12 @@ class MarketplaceMonitor:
                     finally:
                         self.verification_jobs.pop(ident, None)
                     if verification:
-                        complete = task.get('coverage') == 'complete' and task['status'] in {'SUCCESS','NOT_FOUND'}
+                        # A reported-count gap means every rendered listing was
+                        # parsed, while Salidzini's heading over-reported by at
+                        # most two. There is nothing else for the browser tab to
+                        # capture, so the saved result may close it just like a
+                        # fully reconciled result. It is deliberately not cached.
+                        complete = task['status'] in {'SUCCESS','NOT_FOUND'} and task.get('coverage') in {'complete','reported_gap'}
                         self.bridge.finish_verification(verification, 'complete' if complete else 'review',
                                                         status=task['status'], error=task.get('error'))
 
@@ -240,10 +245,21 @@ class MarketplaceMonitor:
             if not parsed["offers"] and not parsed["links"] and not parsed["not_found"] and url != saved:
                 partial = True
         unique = {(o["store"].lower(),o["price_eur"],o["availability"],o["url"]):o for o in offers}
+        reported_gap = False
         if key == 'salidzini' and (offers or any(n is not None for n in salidzini_totals)):
             expected = max((n for n in salidzini_totals if n is not None), default=None)
             counted = salidzini_ids if offers else salidzini_seen_ids
-            partial |= expected is None or len(counted) != expected or any(n is None for n in salidzini_totals) or len(set(salidzini_totals)) > 1
+            totals_consistent = expected is not None and not any(n is None for n in salidzini_totals) and len(set(salidzini_totals)) == 1
+            gap = expected - len(salidzini_ids) if expected is not None else None
+            # Salidzini's visible heading can be one or two above the actual
+            # rendered /click.php listing cards. If every rendered card was
+            # safely parsed and at least 75% of the reported total is present,
+            # retain a truthful non-cacheable Success instead of asking the
+            # user to repeat a manual check that cannot reveal more rows.
+            reported_gap = bool(offers and not partial and not queue and totals_consistent and
+                                salidzini_ids == salidzini_seen_ids and gap is not None and 0 < gap <= 2 and
+                                len(salidzini_ids) / expected >= .75)
+            partial |= not reported_gap and (not totals_consistent or len(counted) != expected)
             task['coverage_detail'] = f'{len(salidzini_ids)} verified listings / {expected if expected is not None else "unknown"} reported; {len(seen)} page(s) read'
         for group, expected in expected_counts.items():
             # Count across pagination, not each page in isolation. Missing rows
@@ -252,7 +268,7 @@ class MarketplaceMonitor:
                         for o in unique.values() if urlsplit(o["url"])._replace(query="", fragment="").geturl() == group}
             partial |= len(captured) < expected
         task.update(offers=list(unique.values()),collection_method="extension" if capture else "marketplace HTML",attempts=task.get("attempts",0)+len(seen),
-                    coverage="partial" if partial or queue else "complete", retry_after=None)
+                    coverage="partial" if partial or queue else "reported_gap" if reported_gap else "complete", retry_after=None)
         if offers:
             task["status"] = "ACTION_REQUIRED" if partial or queue else "SUCCESS"
             task["error"] = (('Incomplete Salidzini coverage: ' + task['coverage_detail'] + '. Review remaining or ambiguous listings.')

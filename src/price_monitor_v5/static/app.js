@@ -486,10 +486,10 @@ function priceAnomalyWarning(row, value) {
   const price = Number(value); const prices = rowPriceValues(row);
   if (!Number.isFinite(price) || prices.length < 2 || prices[0] <= 0) return '';
   const minimum = prices[0]; const next = prices.find(candidate => candidate > minimum);
-  if (price > minimum && (price - minimum) / minimum >= .2) {
+  if (price > minimum && (price - minimum) / minimum >= .5) {
     return `Price warning: ${Math.round((price - minimum) / minimum * 100)}% above the lowest collected price (${euro(minimum)}). Verify the exact model.`;
   }
-  if (Math.abs(price - minimum) < .01 && next && (next - minimum) / next >= .2) {
+  if (Math.abs(price - minimum) < .01 && next && (next - minimum) / next >= .5) {
     return `Price warning: ${Math.round((next - minimum) / next * 100)}% below the next collected price (${euro(next)}). Verify the exact model.`;
   }
   return '';
@@ -507,13 +507,15 @@ function marketplaceCell(row, openDetails, maximum = false) {
     const inStock = task[maximum ? 'highest_in_stock' : 'cheapest_in_stock'];
     const offer = inStock || task[maximum ? 'highest_reported' : 'lowest_reported'];
     const availabilityNote = offer && !inStock ? ` · reported price · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
-    const note = availabilityNote + (task.coverage !== 'complete' ? ' · partial' : '');
+    const coverageNote = task.coverage === 'reported_gap' ? ' · all visible offers collected; marketplace count differs' : task.coverage !== 'complete' ? ' · partial' : '';
+    const note = availabilityNote + coverageNote;
     return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${escapeHtml(note)}</small></span>`;
   }).join('');
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);
     const offers = (task.offers || []).map((offer, index) => `<div class="v5-offer">${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="offer-controls"><button type="button" class="link-action" data-correct-kind="marketplaces" data-correct-item="${task.item_id}" data-correct-source="${escapeHtml(task.marketplace_key)}" data-offer-index="${index}">Edit offer</button><button type="button" class="link-action danger" data-remove-offer="${index}" data-item="${task.item_id}" data-key="${escapeHtml(task.marketplace_key)}">Remove false match</button></span></div>`).join('');
-    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${task.coverage === 'complete' ? 'Page coverage complete' : 'Partial coverage — min/max reflect captured in-stock offers only'}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString('en-GB')) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
+    const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured in-stock offers only';
+    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString('en-GB')) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
   }).join('');
   return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
 }
@@ -924,7 +926,7 @@ async function hardStopRun() {
 
 async function clearCurrentTable() {
   if (!state.currentRunId || byId('clear-run').disabled) return;
-  if (!window.confirm('Clear all current monitoring results and verification requests? Unfinished checks will be stopped.')) return;
+  byId('clear-run-popover').hidden = true;
   const button = byId('clear-run'); button.disabled = true; button.textContent = 'Clearing…'; state.stopRequested = true;
   try {
     if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
@@ -1009,7 +1011,8 @@ function wireEvents() {
   byId('review-actions').addEventListener('click', () => { if (!byId('action-dialog').open) byId('action-dialog').showModal(); }); byId('action-items').addEventListener('click', handleActionDialog);
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
+  document.addEventListener('click', event => { if (!event.target.closest('.run-clear-control')) byId('clear-run-popover').hidden = true; });
   byId('run-mode').addEventListener('change', updateRunModeHelp);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }

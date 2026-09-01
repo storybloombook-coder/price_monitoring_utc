@@ -50,6 +50,13 @@ def test_ambiguous_price_requires_review():
     assert not parsed['offers'] and parsed['rejected'] == 1
 
 
+def test_explicit_zero_rate_vat_suffix_is_still_one_cash_price():
+    html = modern_card(price='111,83').replace('111,83</span>&nbsp;€', '111,83 € PVN 0%</span>')
+    parsed = parse_page('salidzini','115RM9L',html,URL)
+    assert parsed['offers'][0]['price_eur'] == 111.83
+    assert parsed['rejected'] == 0
+
+
 def test_shortened_search_suggests_real_cards_only_without_accepting_variant_price():
     html = modern_card(title='TCL 115RM9X') + modern_card(href='https://geedo.lv/?q=115RM9', title='TCL 115RM9Y')
     assert not parse_page('salidzini','115RM9L',html,URL)['offers']

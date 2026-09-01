@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Price Monitor v5.0.9</title>
+  <title>Price Monitor v5.0.10</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <header class="app-header">
       <div>
         <p class="eyebrow">UTC MARKET INTELLIGENCE</p>
-        <h1>Price Monitor <span class="version">v5.0.9</span></h1>
+        <h1>Price Monitor <span class="version">v5.0.10</span></h1>
         <p class="lead">Marketplace-only intelligence · all sellers, selected shop views.</p>
       </div>
       <div id="service-state" class="service-state">Starting services…</div>
@@ -69,7 +69,7 @@
         <section><details id="shop-settings" class="source-disclosure"><summary class="collapse-summary"><span><strong>Shops</strong><small id="shop-count" class="muted">Seller filters across marketplace offers</small></span><span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="source-group-heading"><label class="switch-row">All shops <input id="shop-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="shop-list" class="country-list"></div></details></section>
       </div>
       <details id="advanced-settings" class="advanced-settings"><summary>Advanced settings <span id="cache-summary">· cache up to 4 hours</span></summary><label class="run-mode-control"><span>Price cache</span><select id="run-mode"><option value="quick">Up to 12 hours</option><option value="balanced" selected>Up to 4 hours</option><option value="deep">Fresh check · no cache</option></select></label><div id="run-mode-help" class="run-mode-help"></div></details>
-      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span><button id="export-run" type="button" class="secondary export-run-button" disabled>Export table to Excel</button></div>
+      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><span class="action-control run-clear-control"><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><span id="clear-run-popover" class="action-popover" hidden><strong>Clear current table?</strong><span>Results and pending verification requests in this run will be removed.</span><span class="popover-actions"><button id="clear-run-cancel" type="button" class="secondary compact">Cancel</button><button id="clear-run-confirm" type="button" class="compact danger-fill">Clear table</button></span></span></span><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span><button id="export-run" type="button" class="secondary export-run-button" disabled>Export table to Excel</button></div>
       <p id="run-network-warning" class="network-warning" role="status" hidden></p>
       <div id="progress" class="progress-block" hidden><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><p id="progress-text" class="muted"></p><p id="progress-detail" class="progress-detail muted"></p></div>
       <div class="result-toolbar">

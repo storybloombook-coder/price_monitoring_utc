@@ -10,6 +10,20 @@ from .offers import compact, matched_model, normalize_offer, availability, price
 from .sources import marketplace_url
 
 
+def reordered_model_title(model, evidence):
+    """Recognize a model split into two adjacent reversed display tokens.
+
+    Kaina sellers sometimes render 115RM9L as ``RM9L, 115``. This is kept
+    deliberately narrower than a substring test: a normal exact model with
+    extra qualifiers (Pro, remote control) and different numeric models stay
+    rejected by the regular matcher.
+    """
+    target = compact(model)
+    tokens = [compact(value) for value in re.findall(r'[A-Z0-9]+', evidence.upper())]
+    rotations = {target[index:] + target[:index] for index in range(1, len(target))}
+    return any(tokens[index] + tokens[index + 1] in rotations for index in range(len(tokens) - 1))
+
+
 def comparison_link(value, page_url):
     try:
         url = marketplace_url("kaina24", urldefrag(urljoin(page_url, value))[0])
@@ -91,8 +105,16 @@ def parse_kaina(model, root, page_url):
             rejected += 1
             continue
         evidence = name.text()
-        if not matched_model("kaina24", model, evidence):
+        # On an exact comparison page every current seller row belongs to the
+        # product in the page heading. Some sellers abbreviate their row title
+        # (for example "TCL RM9L, 115" for 115RM9L), so validating that row in
+        # isolation incorrectly drops a genuine offer and makes coverage look
+        # incomplete. Search result cards still require their own exact match.
+        row_matches = matched_model("kaina24", model, evidence)
+        reordered = product and not row_matches and reordered_model_title(model, evidence)
+        if not row_matches and not reordered:
             continue
+        match_evidence = f"{title} · {evidence}" if reordered else evidence
         target = page_url
         if not product:
             compare = next((comparison_link(n.attrs.get("href", ""), page_url)
@@ -107,7 +129,7 @@ def parse_kaina(model, root, page_url):
             offers.append(normalize_offer("kaina24", model, {
                 "store": seller, "price_eur": cash_price(row, seller),
                 "price_basis": "loyalty" if loyalty else "regular",
-                "title": evidence, "availability": stock_state(row), "url": target,
+                "title": match_evidence, "availability": stock_state(row), "url": target,
             }, page_url))
         except (ValueError, TypeError):
             rejected += 1
