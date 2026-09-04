@@ -13,8 +13,12 @@ function serializeJob(work) {
 }
 
 async function settings() {
-  const saved = await chrome.storage.local.get({ appUrl: DEFAULT_APP_URL, closeSuccessfulTabs: true });
-  return { ...saved, appUrl: String(saved.appUrl || DEFAULT_APP_URL).replace(/\/$/, '') };
+  const saved = await chrome.storage.local.get({ appUrl: DEFAULT_APP_URL, closeSuccessfulTabs: true, clientId: '' });
+  const clientId = saved.clientId || globalThis.crypto?.randomUUID?.() || `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  if (!saved.clientId) await chrome.storage.local.set({ clientId });
+  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
+  const browserName = /Edg\//.test(userAgent) ? 'Edge' : /Firefox\//.test(userAgent) ? 'Firefox' : 'Chrome';
+  return { ...saved, clientId, browserName, appUrl: String(saved.appUrl || DEFAULT_APP_URL).replace(/\/$/, '') };
 }
 
 async function activeJobs() {
@@ -56,10 +60,10 @@ async function ensureOffscreenDocument() {
 
 async function configureLiveChannel() {
   await ensureOffscreenDocument();
-  const { appUrl } = await settings();
+  const { appUrl, clientId, browserName } = await settings();
   const jobs = await activeJobs();
   await chrome.runtime.sendMessage({
-    target: 'offscreen', type: 'configure', appUrl, activeJobIds: Object.keys(jobs)
+    target: 'offscreen', type: 'configure', appUrl, clientId, browserName, activeJobIds: Object.keys(jobs)
   }).catch(() => {});
 }
 
@@ -70,7 +74,8 @@ async function liveChannelConnected() {
 }
 
 async function heartbeat() {
-  const response = await bridgeFetch('/browser-bridge/heartbeat?auto_salidzini=true&open_collect=true', { method: 'POST' });
+  const { clientId, browserName } = await settings();
+  const response = await bridgeFetch(`/browser-bridge/heartbeat?auto_salidzini=true&open_collect=true&client_id=${encodeURIComponent(clientId)}&browser_name=${encodeURIComponent(browserName)}`, { method: 'POST' });
   if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
   return response.json();
 }
@@ -123,7 +128,8 @@ async function snapshot(tabId, model) {
 }
 
 async function submit(jobId, payload) {
-  const response = await bridgeFetch(`/browser-bridge/jobs/${encodeURIComponent(jobId)}/result`, {
+  const { clientId } = await settings();
+  const response = await bridgeFetch(`/browser-bridge/jobs/${encodeURIComponent(jobId)}/result?client_id=${encodeURIComponent(clientId)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload)
@@ -232,7 +238,8 @@ async function acceptJobNow(job) {
 }
 
 async function pollOnce() {
-  const response = await bridgeFetch('/browser-bridge/jobs/next?wait_seconds=1');
+  const { clientId, browserName } = await settings();
+  const response = await bridgeFetch(`/browser-bridge/jobs/next?wait_seconds=1&client_id=${encodeURIComponent(clientId)}&browser_name=${encodeURIComponent(browserName)}`);
   if (response.status === 204) return false;
   if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
   await acceptJob(await response.json());

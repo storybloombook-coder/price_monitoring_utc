@@ -29,6 +29,7 @@ class CaptureJob:
     future: asyncio.Future[dict[str, Any]]
     automatic: bool = False
     verification_id: str | None = None
+    assigned_client: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -55,19 +56,62 @@ class BrowserBridge:
         self.automatic_salidzini = False
         self.open_collect = False
         self._verifications = {}
+        self._clients: dict[str, dict[str, Any]] = {}
+        self.active_client_id: str | None = None
+
+    def _client(self, client_id="legacy", browser_name="Browser"):
+        client_id = str(client_id or "legacy")[:96]
+        record = self._clients.setdefault(client_id, {"id":client_id,"browser_name":browser_name or "Browser",
+                                                       "last_seen":0.0,"websockets":0,
+                                                       "automatic_salidzini":False,"open_collect":False})
+        if browser_name:
+            record["browser_name"] = str(browser_name)[:48]
+        return record
+
+    def client_connected(self, record):
+        return record.get("websockets",0) > 0 or (record.get("last_seen",0) > 0 and
+               time.monotonic() - record["last_seen"] <= self.connected_window_seconds)
+
+    def active_client(self):
+        record = self._clients.get(self.active_client_id) if self.active_client_id else None
+        if record and self.client_connected(record):
+            return record
+        record = next((value for value in self._clients.values() if self.client_connected(value)), None)
+        if record:
+            self.active_client_id = record["id"]
+            self.automatic_salidzini = bool(record.get("automatic_salidzini"))
+            self.open_collect = bool(record.get("open_collect"))
+        return record
 
     @property
     def connected(self) -> bool:
-        return self._websocket_connections > 0 or (
-            self._last_seen > 0 and time.monotonic() - self._last_seen <= self.connected_window_seconds
-        )
+        return self.active_client() is not None
 
-    def heartbeat(self, automatic_salidzini=None, open_collect=None) -> None:
+    def heartbeat(self, automatic_salidzini=None, open_collect=None, client_id="legacy", browser_name="Browser") -> None:
         self._last_seen = time.monotonic()
+        record = self._client(client_id,browser_name)
+        record["last_seen"] = self._last_seen
+        if not self.active_client_id:
+            self.active_client_id = record["id"]
         if automatic_salidzini is not None:
-            self.automatic_salidzini = automatic_salidzini is True
+            record["automatic_salidzini"] = automatic_salidzini is True
+            if record["id"] == self.active_client_id:
+                self.automatic_salidzini = record["automatic_salidzini"]
         if open_collect is not None:
-            self.open_collect = open_collect is True
+            record["open_collect"] = open_collect is True
+            if record["id"] == self.active_client_id:
+                self.open_collect = record["open_collect"]
+
+    def set_active_client(self, client_id):
+        record = self._clients.get(str(client_id))
+        if not record or not self.client_connected(record):
+            raise ValueError("The selected browser extension is not connected")
+        if self._jobs:
+            raise ValueError("Finish or stop the active browser capture before switching browsers")
+        self.active_client_id = record["id"]
+        self.automatic_salidzini = bool(record.get("automatic_salidzini"))
+        self.open_collect = bool(record.get("open_collect"))
+        return self.status()
 
     def begin_verification(self) -> str:
         now = time.monotonic()
@@ -86,24 +130,39 @@ class BrowserBridge:
         if record and record['state'] == 'pending':
             record.update(state=state, **details)
 
-    def websocket_connected(self) -> None:
+    def websocket_connected(self, client_id="legacy", browser_name="Browser") -> None:
         self._websocket_connections += 1
-        self.heartbeat()
+        record = self._client(client_id,browser_name)
+        record["websockets"] += 1
+        self.heartbeat(client_id=client_id,browser_name=browser_name)
 
-    def websocket_disconnected(self) -> None:
+    def websocket_disconnected(self, client_id="legacy") -> None:
         self._websocket_connections = max(0, self._websocket_connections - 1)
+        record = self._clients.get(str(client_id))
+        if record:
+            record["websockets"] = max(0,record.get("websockets",0)-1)
 
     def status(self) -> dict[str, Any]:
         age = time.monotonic() - self._last_seen if self._last_seen else None
+        active = self.active_client()
+        clients = [{"id":record["id"],"browser_name":record["browser_name"],
+                    "connected":self.client_connected(record),
+                    "active":record["id"] == self.active_client_id,
+                    "last_seen_seconds":round(time.monotonic()-record["last_seen"],1) if record["last_seen"] else None,
+                    "transport":"websocket" if record.get("websockets") else "polling"}
+                   for record in self._clients.values()]
         return {
             "connected": self.connected,
             "last_seen_seconds": round(age, 1) if age is not None else None,
             "pending_jobs": len(self._jobs),
-            "transport": "websocket" if self._websocket_connections else ("polling" if self.connected else "offline"),
+            "transport": "websocket" if active and active.get("websockets") else ("polling" if self.connected else "offline"),
             "jobs": [job.public() for job in self._jobs.values()],
             "extension_id": EXTENSION_ID,
             "automatic_salidzini": self.automatic_salidzini,
             "open_collect": self.open_collect,
+            "active_client_id": self.active_client_id,
+            "active_browser": active.get("browser_name") if active else None,
+            "clients": clients,
         }
 
     async def capture(self, shop_key: str, model: str, url: str, *, automatic=False, verification_id=None) -> dict[str, Any]:
@@ -132,8 +191,11 @@ class BrowserBridge:
                 if not job.future.done():
                     job.future.cancel()
 
-    async def next_job(self, wait_seconds: float = 25) -> dict[str, Any] | None:
-        self.heartbeat()
+    async def next_job(self, wait_seconds: float = 25, client_id="legacy", browser_name="Browser") -> dict[str, Any] | None:
+        self.heartbeat(client_id=client_id,browser_name=browser_name)
+        if self.active_client_id != str(client_id):
+            await asyncio.sleep(min(max(wait_seconds,0),1))
+            return None
         deadline = time.monotonic() + max(0, min(wait_seconds, 25))
         while True:
             remaining = deadline - time.monotonic()
@@ -145,13 +207,15 @@ class BrowserBridge:
                 return None
             job = self._jobs.get(job_id)
             if job and not job.future.done():
+                job.assigned_client = str(client_id)
                 return job.public()
 
-    def submit(self, job_id: str, payload: dict[str, Any]) -> bool:
-        self.heartbeat()
+    def submit(self, job_id: str, payload: dict[str, Any], client_id="legacy") -> bool:
+        self.heartbeat(client_id=client_id)
         job = self._jobs.get(job_id)
-        if not job or job.future.done():
+        if not job or job.future.done() or (job.assigned_client and job.assigned_client != str(client_id)):
             return False
+        payload["browser_client_id"] = str(client_id)
         job.future.set_result(payload)
         return True
 
@@ -161,3 +225,5 @@ class BrowserBridge:
                 job.future.cancel()
         self._jobs.clear()
         self._websocket_connections = 0
+        self._clients.clear()
+        self.active_client_id = None

@@ -112,13 +112,22 @@ def parse_kaina(model, root, page_url):
         # incomplete. Search result cards still require their own exact match.
         row_matches = matched_model("kaina24", model, evidence)
         reordered = product and not row_matches and reordered_model_title(model, evidence)
-        if not row_matches and not reordered:
+        # The page heading authorizes abbreviated/reordered seller titles, but
+        # an explicit different SKU inside a mixed/recommended row must still
+        # be rejected.  Kaina currently uses the narrow reordered form for the
+        # problematic 115RM9L rows.
+        if (product and not row_matches and not reordered) or (not product and not row_matches):
             continue
-        match_evidence = f"{title} · {evidence}" if reordered else evidence
+        match_evidence = f"{title} · {evidence}" if product else evidence
         target = page_url
         if not product:
             compare = next((comparison_link(n.attrs.get("href", ""), page_url)
                             for n in row.nodes() if n.tag == "a" and n.has("product-item__compare")), None)
+            mismatched_compare = bool(compare and not matched_model("kaina24", model, urlsplit(compare).path))
+            # Mixed search cards occasionally mention 43P7L but link to the
+            # 75P7L comparison. Never follow or retain that cross-SKU snapshot.
+            if mismatched_compare:
+                compare = None
             if compare:
                 target = compare
                 if compare not in links:
@@ -126,6 +135,8 @@ def parse_kaina(model, root, page_url):
         try:
             seller = seller_name(row, product)
             loyalty = compact(seller) in {"SENUKAI", "SENUKAILT"} and bool(re.search(r"smart\s*net|lojalumo|su kortele", row.text(), re.I))
+            if not product and mismatched_compare:
+                continue
             offers.append(normalize_offer("kaina24", model, {
                 "store": seller, "price_eur": cash_price(row, seller),
                 "price_basis": "loyalty" if loyalty else "regular",

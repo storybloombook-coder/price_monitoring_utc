@@ -56,7 +56,7 @@ def seller_key(name, marketplace_key=None):
 # Italian pages use HE headings and H identifiers for these two soundbars:
 # https://www.tcl.com/it/it/soundbar/s55h
 # https://www.tcl.com/it/it/support-soundbar/model/s45h
-MODEL_ALIASES = {"S45HE": "S45H", "S55HE": "S55H"}
+MODEL_ALIASES = {"S45HE": "S45H", "S55HE": "S55H", "Q75HE": "Q75H"}
 
 
 def matched_model(key, model, text):
@@ -70,6 +70,29 @@ def shortened_queries(model):
     original = re.sub(r"^TCL[\s_-]*", "", model.strip(), flags=re.I)
     return [value for width in (1, 2) if len(value := original[:-width].strip()) >= 3
             and re.search(r"[A-Za-z]", value) and re.search(r"\d", value)]
+
+
+def candidate_model(query, text):
+    """Return the concrete SKU token behind a shortened-search candidate."""
+    prefix = compact(query)
+    candidates = [compact(token) for token in re.findall(r"[A-Z0-9-]+", str(text).upper())]
+    candidates = [token for token in candidates if token.startswith(prefix) and token != prefix
+                  and re.search(r"[A-Z]", token) and re.search(r"\d", token)]
+    return min(candidates, key=len, default=None)
+
+
+def plausible_shortened_candidate(model, title):
+    """Only a literal one/two-character suffix removal deserves review.
+
+    A broad prefix match such as 25G54 -> 25G64 is a different model, not a
+    candidate that should consume the first slot of every retry batch.
+    """
+    original = compact(model)
+    aliases = {compact(value) for value in shortened_queries(model)}
+    alias = MODEL_ALIASES.get(original)
+    if alias:
+        aliases.add(compact(alias))
+    return any(exact_model(value, title) for value in aliases)
 
 
 LEGACY_OFFER_CLASSES = {"shop-row", "seller-row", "offer", "product-offer", "cena-item", "item_block"}
@@ -146,7 +169,8 @@ def candidate_links(query, content, page_url, key="hinnavaatlus"):
         signature = (node.text(), url)
         if url and signature not in seen:
             seen.add(signature)
-            matches.append({"title": node.text()[:600], "url": url, "query": query})
+            model = candidate_model(query, node.text())
+            matches.append({"title": node.text()[:600], "url": url, "query": query, "model": model})
     return matches[:20]
 
 

@@ -336,6 +336,11 @@ dialog form { padding: 20px; }
 .advanced-settings > summary { cursor: pointer; padding: 6px 0; }
 .advanced-settings .run-mode-control { margin: 8px 0; }
 .candidate-matches { display: grid; gap: 6px; margin: 8px 0; padding: 10px; background: #fff4d5; border-radius: 8px; }
+.candidate-card { display:grid; grid-template-columns:28px minmax(0,1fr) auto; gap:9px; align-items:center; padding:8px; background:#fff; border:1px solid #ead7a7; border-radius:9px; }
+.candidate-card div { display:grid; gap:2px; min-width:0; }
+.candidate-card a { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.candidate-number { display:grid; place-items:center; width:26px; height:26px; border-radius:50%; background:#16784a; color:#fff; font-weight:800; }
+.remember-alias { display:flex; align-items:center; gap:7px; font-size:12px; }
 .v5-offer { display: flex; flex-direction: column; gap: 5px; padding: 9px 0; border-bottom: 1px solid #e1e8e4; }
 .offer-controls { display: flex; gap: 12px; flex-wrap: wrap; }
 .badge.not-listed { color: #566170; background: #edf0f4; }
@@ -344,3 +349,4 @@ dialog form { padding: 20px; }
 .marketplace-summary-offer small { display: block; color: #8a651a; }
 .salidzini-mode { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); }
 .salidzini-mode select { width:auto; padding:5px 8px; border:1px solid var(--line); border-radius:16px; background:var(--surface); color:var(--text); }
+.browser-switches { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }

@@ -17,6 +17,19 @@ def infer_model(text):
 
 
 class CatalogStore(BaseCatalog):
+    def model_aliases(self):
+        return self.get_meta("v5_model_aliases", {})
+
+    def remember_model_alias(self, model, alias):
+        model, alias = canonicalize(model), canonicalize(alias)
+        if not model or not alias or compact(model) == compact(alias):
+            raise ValueError("Choose a different model variant")
+        aliases = self.model_aliases()
+        aliases[compact(model)] = alias
+        with self._lock, self.connect() as db:
+            self._set_meta(db, "v5_model_aliases", aliases)
+        return alias
+
     def salidzini_mode(self):
         return self.get_meta('v5_salidzini_mode', 'auto')
 
@@ -170,6 +183,7 @@ class CatalogStore(BaseCatalog):
             raise ValueError("Add an active model and enable at least one marketplace")
         self.register_monitoring_session(run_id, False, [s["key"] for s in sources], mode)
         stock = self.list_items("stock")
+        aliases = self.model_aliases()
         for item in items.values():
             matching_stock = [s for s in stock if compact(s.get("canonical_model")) == compact(item["canonical_model"])]
             quantity = sum(s["quantity"] or 0 for s in matching_stock)
@@ -182,6 +196,8 @@ class CatalogStore(BaseCatalog):
                         "offers": [], "search_url": search_url(key, item["model"]), "product_url": item.get("marketplace_links", {}).get(key),
                         "stock_quantity": quantity, "stock_unit_cost_eur": cost, "cached": False,
                         "previous_manual_resolution": self.previous_decision(item["id"], key, run_id)}
+                if aliases.get(compact(item["model"])):
+                    task["accepted_model"] = aliases[compact(item["model"])]
                 if key == 'salidzini':
                     task['salidzini_mode'] = self.salidzini_mode()
                 ttl = {"quick": 12, "balanced": 4, "deep": 0}[mode]
@@ -246,6 +262,12 @@ class CatalogStore(BaseCatalog):
             raise KeyError("Run not found")
         tasks = [] if session.get("cleared_at") else self.checks(run_id)
         for task in tasks:
+            message = str(task.get("error") or "").lower()
+            deterministic = bool(task.get("candidate_matches")) or bool(task.get("offers") and task.get("coverage") == "partial")
+            transient = task.get("status") in {"ACTION_REQUIRED", "FAILED", "INCOMPLETE"} or task.get("error_code") == "NETWORK_UNAVAILABLE" or any(
+                marker in message for marker in ("timeout", "timed out", "did not become ready", "page loading", "no request was sent", "connection failed")
+            )
+            task["retry_class"] = "review" if deterministic else "transient" if transient else "none"
             # Seller identity is derived, not a price observation. Apply current
             # aliases to stored/cache results too, without rewriting prices,
             # timestamps, original seller labels or historical check records.
@@ -270,7 +292,7 @@ class CatalogStore(BaseCatalog):
                 # Salidzini can truthfully report a small heading/count gap
                 # after every visible card was inspected. Treat that as a
                 # completed marketplace observation rather than unverified.
-                complete = all(t["status"] in {"SUCCESS","NOT_FOUND"} and t.get("coverage") in {"complete", "reported_gap"} for t in model_tasks)
+                complete = all(t["status"] in {"SUCCESS","NOT_FOUND"} and t.get("coverage") in {"complete", "reported_gap", "accepted_partial"} for t in model_tasks)
                 status = "SUCCESS" if best else "NOT_LISTED" if complete else "UNVERIFIED"
                 shops.append({"item_id": item_id, "model": model_tasks[0]["source_model"], "shop_key": shop.key,"shop_name": shop.name,"status":status,
                               "observations": observations, "price_eur": best.get("price_eur"), "availability": best.get("availability"),

@@ -1,12 +1,11 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.14
+# PriceMonitor v5 Marketplace Bridge · 5.0.15
 
-In 5.0.14, Salidzini Auto spaces navigations by at least 12 seconds, waits up to
-30 seconds for a stable result page and accepts both `item_box_main` and
-`item_box_sub` layouts. CAPTCHA pauses the whole current batch immediately;
-two consecutive unavailable pages also pause it before more marketplace
-requests are sent. The retained tab can be verified manually, then an explicit
-small retry batch starts a fresh guarded attempt. The extension never solves or
-bypasses CAPTCHA, and trusted site cookies should not be cleared.
+In 5.0.15 every Chrome/Edge installation has its own local client identity.
+PriceMonitor selects exactly one active browser; a second connected browser is
+standby and cannot consume the same job. Switch only from the application while
+no capture is active. Salidzini Auto uses a guarded 5 + 5 + 10 page cycle with
+pauses and reports its health/cooldown in the application. CAPTCHA is never
+solved or bypassed, and trusted site cookies should not be cleared.
 
 ## Open & collect
 

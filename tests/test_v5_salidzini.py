@@ -61,7 +61,7 @@ def test_shortened_search_suggests_real_cards_only_without_accepting_variant_pri
     html = modern_card(title='TCL 115RM9X') + modern_card(href='https://geedo.lv/?q=115RM9', title='TCL 115RM9Y')
     assert not parse_page('salidzini','115RM9L',html,URL)['offers']
     candidates = candidate_links('115RM9', html, URL, 'salidzini')
-    assert candidates == [{'title':'TCL 115RM9X','url':URL,'query':'115RM9'}]
+    assert candidates == [{'title':'TCL 115RM9X','url':URL,'query':'115RM9','model':'115RM9X'}]
 
 
 def test_only_geedo_does_not_prove_not_found():

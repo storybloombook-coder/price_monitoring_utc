@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "PriceMonitor v5 Marketplace Bridge",
-  "version": "5.0.14",
+  "version": "5.0.15",
   "description": "Marketplace collection with automatic and one-click verified capture. No retailer pages.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAshia32PlDSCrMjV0tXry7liWRm/QtyEyNCLYs/6NTPsnO/FdZSi9zGM2e8bP0uafgcVrrUM3Cjy1biDvFj02edHz+ExtcktpXEAOQbL0Rsc/4SsqARJTGYtqbNKw18o2rQHz7D85xzptT0NPYdH/lbxQ8zJhd68HnxPDw87F91xmEewJ6oJkMDpjG/H7da9Zr4Tn+2NJ7bsXRrjo60d3WU217x7ThIf2tUPMqsEjoRzLdiddaXVg0/qR6oI5hwiABMEk1LUdWFfebA3l8l0WQMEMtep1JnIpBLS2/HoxdLEDy7bc+zEOZoa7vWlNx10eHmX4tQOX1QkmJXtANlCfTQIDAQAB",
   "permissions": [

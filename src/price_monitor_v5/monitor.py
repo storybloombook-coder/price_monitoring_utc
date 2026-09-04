@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlsplit, parse_qsl, urlencode
 import httpx
 from .catalog import utc_now
 from .sources import marketplace_url, search_url, same_salidzini_search, MARKETPLACES
-from .offers import parse_page, normalize_offer, shortened_queries, candidate_links
+from .offers import parse_page, normalize_offer, shortened_queries, candidate_links, plausible_shortened_candidate
 
 
 class ReviewRequired(ValueError):
@@ -47,24 +47,34 @@ class MarketplaceMonitor:
             "stopped": False,
         }
         self.activities[run_id] = {}
-        # An explicit new run/retry is the user's signal that the retained
-        # browser tab has been inspected and the session may be tried again.
-        self.salidzini_health[run_id] = {
-            "consecutive_unavailable": 0,
-            "paused": False,
-            "reason": None,
-        }
+        # Keep a live protection cooldown across retry clicks. A new attempt is
+        # allowed after it expires or after a deliberate active-browser switch.
+        previous = self.salidzini_health.get(run_id, {})
+        cooldown = previous.get("cooldown_until")
+        if self.delay == 0 or not cooldown or cooldown <= utc_now():
+            self.salidzini_health[run_id] = {
+                "consecutive_unavailable": 0, "successful_pages": 0,
+                "paused": False, "reason": None, "cooldown_until": None,
+                "pause_until_monotonic": 0,
+            }
 
     def salidzini_state(self, run_id):
         return self.salidzini_health.setdefault(run_id, {
-            "consecutive_unavailable": 0,
-            "paused": False,
-            "reason": None,
+            "consecutive_unavailable": 0, "successful_pages": 0,
+            "paused": False, "reason": None, "cooldown_until": None,
+            "pause_until_monotonic": 0,
         })
+
+    def reset_salidzini_browser_cycle(self):
+        """A deliberate active-browser switch starts a fresh isolated session."""
+        for state in self.salidzini_health.values():
+            state.update(consecutive_unavailable=0, successful_pages=0, paused=False,
+                         reason=None, cooldown_until=None, pause_until_monotonic=0)
 
     def pause_salidzini(self, run_id, reason):
         state = self.salidzini_state(run_id)
-        state.update(paused=True, reason=reason)
+        state.update(paused=True, reason=reason,
+                     cooldown_until=(datetime.now(UTC)+timedelta(minutes=50)).isoformat())
 
     def record_salidzini_capture(self, run_id, result):
         """Pause a batch before repeated blank/protected pages create a block."""
@@ -81,8 +91,17 @@ class MarketplaceMonitor:
             state["consecutive_unavailable"] += 1
             if state["consecutive_unavailable"] >= 2:
                 self.pause_salidzini(run_id, "two consecutive unavailable result pages")
-        elif not message:
+        elif not message and int(result.get("salidzini_card_count") or 0) > 0:
             state.update(consecutive_unavailable=0, reason=None)
+            state["successful_pages"] = int(state.get("successful_pages") or 0) + 1
+            count = state["successful_pages"]
+            if count == 5:
+                state.update(reason="Safe Auto pause after 5 pages", pause_until_monotonic=time.monotonic()+45)
+            elif count == 10:
+                state.update(reason="Safe Auto pause after the next 5 pages", pause_until_monotonic=time.monotonic()+90)
+            elif count >= 20:
+                state.update(paused=True, reason="Safe 5 + 5 + 10 cycle complete; switch the active browser or wait before continuing",
+                             cooldown_until=(datetime.now(UTC)+timedelta(minutes=20)).isoformat())
 
     def schedule(self, task, capture=False):
         ident = (task["run_id"], task["item_id"], task["marketplace_key"])
@@ -131,6 +150,8 @@ class MarketplaceMonitor:
                 "eta_seconds": estimate, "current": event,
                 "protection_paused": bool(guard.get("paused")),
                 "protection_reason": guard.get("reason"),
+                "safe_pages": guard.get("successful_pages",0),
+                "cooldown_until": guard.get("cooldown_until"),
             })
         return {"label": batch["label"], "started_at": batch["started_at"],
                 "stopped": batch.get("stopped", False), "marketplaces": rows}
@@ -176,6 +197,7 @@ class MarketplaceMonitor:
         key, model = task["marketplace_key"], task["source_model"]
         automatic = key == 'salidzini' and task.get('salidzini_mode') == 'auto'
         verification = self.verification_jobs.get(ident)
+        retry_timeout = False
         try:
             async with self.locks[key]:
                 task.pop("automation_paused", None)
@@ -188,6 +210,12 @@ class MarketplaceMonitor:
                     if not self.bridge.connected or not getattr(self.bridge, 'automatic_salidzini', False):
                         raise ReviewRequired('Salidzini Auto needs the connected v5.0.8+ extension. Reload/connect it, then retry; manual page capture remains available.')
                     state = self.salidzini_state(task["run_id"])
+                    pause = max(0, float(state.get("pause_until_monotonic") or 0)-time.monotonic())
+                    if pause:
+                        self.set_activity(task, f"Safe Salidzini pause · resuming in {round(pause)} s")
+                        await asyncio.sleep(pause)
+                        state["pause_until_monotonic"] = 0
+                        state["reason"] = None
                     if state["paused"]:
                         task["automation_paused"] = True
                         raise ReviewRequired('Salidzini Auto paused this batch to protect the browser session after CAPTCHA or repeated unavailable pages. No request was sent for this SKU. Complete the CAPTCHA in the retained tab, then retry Salidzini in a batch of 5.')
@@ -213,6 +241,15 @@ class MarketplaceMonitor:
             task.update(status="ACTION_REQUIRED", coverage="partial", error_code="NETWORK_UNAVAILABLE",
                         error="Network connection failed before the marketplace could be read. Check Internet/firewall/proxy access and restart PriceMonitor from its folder. This is not a CAPTCHA or a missing product.")
             self.set_activity(task, "Network unavailable — moved to review; queue continues")
+        except TimeoutError:
+            if key == "hinnavaatlus" and not capture and int(task.get("timeout_retry_count") or 0) < 1:
+                task["timeout_retry_count"] = 1
+                task.update(status="PENDING", coverage="partial", error="First Hinnavaatlus timeout; one automatic retry is queued")
+                self.set_activity(task, "Hinnavaatlus timed out — automatic retry 1/1")
+                retry_timeout = True
+            else:
+                task.update(status="ACTION_REQUIRED", coverage="partial", error="Marketplace check timed out; use Quick Review or retry")
+                self.set_activity(task, "Timed out — moved to review; queue continues")
         except Exception as error:
             task.update(status="ACTION_REQUIRED", coverage="partial", error=str(error) or "Check timed out; use manual review")
             self.set_activity(task, "Needs review — continuing with the next check")
@@ -240,7 +277,10 @@ class MarketplaceMonitor:
                         complete = task['status'] in {'SUCCESS','NOT_FOUND'} and task.get('coverage') in {'complete','reported_gap'}
                         self.bridge.finish_verification(verification, 'complete' if complete else 'review',
                                                         status=task['status'], error=task.get('error'))
-                    if not any(run_id == task['run_id'] for run_id, _, _ in self.jobs):
+                    if retry_timeout:
+                        loop = asyncio.get_running_loop()
+                        loop.call_later(1, lambda current=task: self.schedule(current, False))
+                    elif not any(run_id == task['run_id'] for run_id, _, _ in self.jobs):
                         self.activities.pop(task['run_id'], None)
                         if task['run_id'] in self.batches:
                             self.batches[task['run_id']]["completed_at"] = utc_now()
@@ -259,6 +299,7 @@ class MarketplaceMonitor:
 
     async def collect_once(self, task, client, capture, query=None):
         key, model = task["marketplace_key"], task["source_model"]
+        parse_model = task.get("accepted_model") or model
         saved = task.get("product_url") if query is None else None
         if saved and key == 'salidzini' and (task.get('salidzini_mode') == 'auto' or task.get('verification_id')):
             # A manually saved page 2 must not make Auto skip page 1.
@@ -285,6 +326,17 @@ class MarketplaceMonitor:
                     automatic = key == 'salidzini' and task.get('salidzini_mode') == 'auto'
                     verification = task.get('verification_id')
                     if automatic or verification:
+                        if automatic:
+                            state = self.salidzini_state(task["run_id"])
+                            pause = max(0, float(state.get("pause_until_monotonic") or 0)-time.monotonic())
+                            if pause:
+                                self.set_activity(task, f"Safe Salidzini pause · resuming in {round(pause)} s")
+                                await asyncio.sleep(pause)
+                                state["pause_until_monotonic"] = 0
+                                state["reason"] = None
+                            if state.get("paused"):
+                                task["automation_paused"] = True
+                                raise ReviewRequired('Safe Salidzini browser cycle paused before another page was opened. Switch the active browser or wait for the displayed cooldown.')
                         pace_key = key + '-browser'
                         pace = self.salidzini_delay if automatic else self.delay
                         wait = pace - (time.monotonic() - self.last_request.get(pace_key, 0))
@@ -317,7 +369,7 @@ class MarketplaceMonitor:
                     partial |= bool(result.get("incomplete"))
                 else:
                     content, final = await self.fetch(client,key,url)
-                parsed = parse_page(key,model,content,final)
+                parsed = parse_page(key,parse_model,content,final)
                 self.set_activity(task, f"Classifying offers on page {len(seen)}")
                 if key == 'salidzini':
                     salidzini_ids.update(parsed.get('salidzini_offer_ids', []))
@@ -325,6 +377,8 @@ class MarketplaceMonitor:
                     salidzini_totals.append(parsed.get('salidzini_expected_count'))
                 if query and not parsed["offers"]:
                     for candidate in candidate_links(query, content, final, key):
+                        if not plausible_shortened_candidate(model, candidate["title"]):
+                            continue
                         if not any(c["url"] == candidate["url"] for c in task["candidate_matches"]):
                             task["candidate_matches"].append(candidate)
             except httpx.HTTPStatusError as error:
@@ -460,7 +514,9 @@ class MarketplaceMonitor:
         if url:
             task["product_url"] = marketplace_url(key,url)
             self.store.remember_source_link(item_id,key,url)
-        task.update(status="PENDING",error=None,cached=False)
+        task.update(status="PENDING",error=None,cached=False,
+                    retry_count=int(task.get("retry_count") or 0)+1,
+                    last_retry_at=utc_now())
         try:
             self.store.save_check(task)
         except Exception:
@@ -481,6 +537,7 @@ class MarketplaceMonitor:
         if status not in {"SUCCESS","NOT_FOUND"}:
             raise ValueError("Choose SUCCESS or NOT_FOUND")
         url = marketplace_url(key, payload.get("product_url") or task.get("product_url") or task["search_url"])
+        undo = {k:v for k,v in task.items() if k != "undo_snapshot"}
         if status == "NOT_FOUND":
             offers = []
         else:
@@ -499,6 +556,50 @@ class MarketplaceMonitor:
         decision = {**payload,"product_url":url}
         self.store.record_decision(task,decision)
         task.update(status=status,offers=offers,coverage="complete" if complete else "partial",collection_method="manual",cached=False,
-                    manual_resolution=decision,error=None,retry_after=None,finished_at=utc_now())
+                    manual_resolution=decision,error=None,retry_after=None,finished_at=utc_now(),undo_snapshot=undo)
         self.store.save_check(task)
         return task
+
+    async def accept_candidate(self, run_id, item_id, key, payload):
+        task = self.store.check(run_id, item_id, key)
+        candidates = task.get("candidate_matches") or []
+        index = int(payload.get("candidate_index", -1))
+        if index < 0 or index >= len(candidates):
+            raise ValueError("Candidate changed; reopen Quick Review")
+        candidate = candidates[index]
+        alias = candidate.get("model")
+        if not alias:
+            raise ValueError("The candidate model could not be identified")
+        task["undo_snapshot"] = {k:v for k,v in task.items() if k != "undo_snapshot"}
+        task["accepted_model"] = alias
+        task["product_url"] = marketplace_url(key, candidate["url"])
+        task["quick_review_resolution"] = {"choice":"candidate", "candidate":candidate, "decided_at":utc_now()}
+        if payload.get("remember_alias"):
+            self.store.remember_model_alias(task["source_model"], alias)
+        self.store.remember_source_link(item_id, key, task["product_url"])
+        self.store.save_check(task)
+        return await self.retry(run_id, item_id, key, url=task["product_url"], capture=False)
+
+    async def accept_partial(self, run_id, item_id, key):
+        task = self.store.check(run_id, item_id, key)
+        if not task.get("offers"):
+            raise ValueError("There are no collected offers to accept")
+        await self.cancel_pair(run_id, item_id, key)
+        undo = {k:v for k,v in task.items() if k != "undo_snapshot"}
+        decision = {"status":"SUCCESS", "choice":"accept_partial", "decided_at":utc_now()}
+        self.store.record_decision(task, decision)
+        task.update(status="SUCCESS", coverage="accepted_partial", collection_method="review",
+                    manual_resolution=decision, error=None, retry_after=None,
+                    finished_at=utc_now(), undo_snapshot=undo)
+        self.store.save_check(task)
+        return task
+
+    async def undo(self, run_id, item_id, key):
+        task = self.store.check(run_id, item_id, key)
+        snapshot = task.get("undo_snapshot")
+        if not snapshot:
+            raise ValueError("No review decision is available to undo")
+        await self.cancel_pair(run_id, item_id, key)
+        snapshot["finished_at"] = utc_now()
+        self.store.save_check(snapshot)
+        return snapshot

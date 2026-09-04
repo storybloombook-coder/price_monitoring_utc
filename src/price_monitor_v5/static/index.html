@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Price Monitor v5.0.14</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=5.0.14">
+  <title>Price Monitor v5.0.15</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=5.0.15">
 </head>
 <body>
   <main>
     <header class="app-header">
       <div>
         <p class="eyebrow">UTC MARKET INTELLIGENCE</p>
-        <h1>Price Monitor <span class="version">v5.0.14</span></h1>
+        <h1>Price Monitor <span class="version">v5.0.15</span></h1>
         <p class="lead">Marketplace-only intelligence · all sellers, selected shop views.</p>
       </div>
       <div class="header-controls"><div id="service-state" class="service-state">Starting services…</div><div class="language-switch" role="group" aria-label="Interface language"><button type="button" data-language="en" aria-pressed="false">EN</button><button type="button" data-language="ru" aria-pressed="false">RU</button></div></div>
@@ -62,14 +62,25 @@
 
     <section class="card monitoring-card">
       <div class="section-heading"><div><p class="eyebrow">STEP 3</p><h2>Monitoring</h2></div><p class="muted">Choose marketplaces to query and shops to display. Retailer sites are never queried.</p></div>
-      <div id="browser-bridge-state" class="browser-bridge-state"><span class="bridge-dot"></span><span>Checking Edge extension…</span></div>
+      <div id="browser-bridge-state" class="browser-bridge-state"><span class="bridge-dot"></span><span>Checking browser extensions…</span></div>
       <div id="polite-mode-state" class="polite-mode-state">Polite mode · one request per shop · loading policy…</div>
       <div id="source-settings" class="source-settings">
         <section><details id="marketplace-settings" class="source-disclosure"><summary class="collapse-summary"><span><strong>Marketplaces</strong><small id="marketplace-count" class="muted">Comparison platforms</small></span><span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="source-group-heading"><label class="switch-row">All marketplaces <input id="marketplace-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="marketplace-list" class="source-list"></div></details></section>
         <section><details id="shop-settings" class="source-disclosure"><summary class="collapse-summary"><span><strong>Shops</strong><small id="shop-count" class="muted">Seller filters across marketplace offers</small></span><span class="collapse-button" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span></summary><div class="source-group-heading"><label class="switch-row">All shops <input id="shop-master" type="checkbox" role="switch"><span class="switch"></span></label></div><div id="shop-list" class="country-list"></div></details></section>
       </div>
       <details id="advanced-settings" class="advanced-settings"><summary>Advanced settings <span id="cache-summary">· cache up to 4 hours</span></summary><label class="run-mode-control"><span>Price cache</span><select id="run-mode"><option value="quick">Up to 12 hours</option><option value="balanced" selected>Up to 4 hours</option><option value="deep">Fresh check · no cache</option></select></label><div id="run-mode-help" class="run-mode-help"></div></details>
-      <div class="run-actions"><button id="start-run" type="button">Start monitoring</button><span class="action-control run-clear-control"><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><span id="clear-run-popover" class="action-popover" hidden><strong>Clear current table?</strong><span>Results and pending verification requests in this run will be removed.</span><span class="popover-actions"><button id="clear-run-cancel" type="button" class="secondary compact">Cancel</button><button id="clear-run-confirm" type="button" class="compact danger-fill">Clear table</button></span></span></span><details id="retry-options" class="retry-options"><summary>Retry options</summary><div class="retry-options-menu"><label>Marketplace<select id="retry-marketplace"><option value="all">All marketplaces</option><option value="kaina24">Kaina24</option><option value="salidzini">Salidzini</option><option value="hinnavaatlus">Hinnavaatlus</option></select></label><label>Batch size<select id="retry-limit"><option value="5">5 checks</option><option value="10" selected>10 checks</option><option value="25">25 checks</option><option value="10000">All matching checks</option></select></label><label class="retry-not-found"><input id="retry-include-not-found" type="checkbox"> Include Not found</label></div></details><button id="retry-unresolved" type="button" class="secondary" disabled>Retry unresolved</button><button id="retry-salidzini" type="button" class="secondary" disabled>Retry Salidzini only</button><button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button><button id="review-actions" type="button" class="secondary" hidden>Review required checks</button><span id="run-state" class="muted">Ready.</span><button id="export-run" type="button" class="secondary export-run-button" disabled>Export table to Excel</button></div>
+      <div class="run-actions">
+        <button id="start-run" type="button">Start monitoring</button>
+        <span class="action-control run-clear-control"><button id="clear-run" type="button" class="clear-table" disabled>Clear table</button><span id="clear-run-popover" class="action-popover" hidden><strong>Clear current table?</strong><span>Results and pending verification requests in this run will be removed.</span><span class="popover-actions"><button id="clear-run-cancel" type="button" class="secondary compact">Cancel</button><button id="clear-run-confirm" type="button" class="compact danger-fill">Clear table</button></span></span></span>
+        <details id="retry-options" class="retry-options"><summary>Retry options</summary><div class="retry-options-menu"><label>Marketplace<select id="retry-marketplace"><option value="all">All marketplaces</option><option value="kaina24">Kaina24</option><option value="salidzini">Salidzini</option><option value="hinnavaatlus">Hinnavaatlus</option></select></label><label>Batch size<select id="retry-limit"><option value="5">5 checks</option><option value="10" selected>10 checks</option><option value="25">25 checks</option><option value="10000">All matching checks</option></select></label><label class="retry-not-found"><input id="retry-include-not-found" type="checkbox"> Include Not found</label></div></details>
+        <button id="retry-unresolved" type="button" class="secondary" disabled>Retry unresolved</button>
+        <button id="retry-salidzini" type="button" class="secondary" disabled>Retry Salidzini only</button>
+        <button id="test-salidzini" type="button" class="secondary warning-button" disabled>Test Salidzini session</button>
+        <button id="stop-run" type="button" class="hard-stop" hidden>■ Hard stop</button>
+        <button id="review-actions" type="button" class="secondary" hidden>Review required checks</button>
+        <span id="run-state" class="muted">Ready.</span>
+        <button id="export-run" type="button" class="secondary export-run-button" disabled>Export table to Excel</button>
+      </div>
       <p id="run-network-warning" class="network-warning" role="status" hidden></p>
       <div id="progress" class="progress-block" hidden><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><p id="progress-text" class="muted"></p><p id="progress-detail" class="progress-detail muted"></p><p id="progress-activity" class="progress-activity muted"></p><div id="queue-progress" class="queue-progress"></div></div>
       <div class="result-toolbar">
@@ -148,7 +159,7 @@
       <div class="dialog-actions"><button type="button" class="secondary" data-cancel-catalog-clear>Cancel</button><button type="submit" class="danger-fill">Move all to Trash</button></div>
     </form>
   </dialog>
-  <script src="/assets/i18n.js?v=5.0.14" defer></script>
-  <script src="/assets/app.js?v=5.0.14" defer></script>
+  <script src="/assets/i18n.js?v=5.0.15" defer></script>
+  <script src="/assets/app.js?v=5.0.15" defer></script>
 </body>
 </html>

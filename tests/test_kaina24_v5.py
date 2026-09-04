@@ -59,6 +59,16 @@ def test_legacy_search_cards_use_seller_cash_price_not_financing_or_summary():
     assert result["links"] == [URL] and not result["partial"]
 
 
+def test_search_card_never_cross_contaminates_a_similar_comparison_sku():
+    html = card("Varle.lt", "809.75", model="43P7L").replace(
+        'href="https://www.kaina24.lt/p/tcl-24g54/"',
+        'href="https://www.kaina24.lt/p/tcl-75p7l/"',
+    )
+    result = parse_page("kaina24", "43P7L", html, "https://www.kaina24.lt/s/43p7l/")
+    assert result["offers"] == []
+    assert result["links"] == []
+
+
 def test_product_rows_ignore_mobile_duplicates_recommendations_and_other_models():
     html = product(seller_row(), seller_row("Varle.lt", "108.27"), seller_row("Other", "99", "27G64"), count=2)
     html += card("Recommendation", "1") + '<a href="/p/recommended-24g54/">TCL 24G54</a>'

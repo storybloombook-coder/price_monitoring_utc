@@ -1,6 +1,8 @@
 const HEARTBEAT_MS = 20000;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
 let appUrl = '';
+let clientId = 'legacy';
+let browserName = 'Browser';
 let activeJobIds = [];
 let socket = null;
 let heartbeatTimer = null;
@@ -11,7 +13,7 @@ function websocketUrl(value) {
   const url = new URL(value);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = '/browser-bridge/ws';
-  url.search = '?auto_salidzini=1&open_collect=1';
+  url.search = `?auto_salidzini=1&open_collect=1&client_id=${encodeURIComponent(clientId)}&browser_name=${encodeURIComponent(browserName)}`;
   url.hash = '';
   return url.toString();
 }
@@ -75,9 +77,13 @@ onmessage = event => {
   const message = event.data || {};
   if (message.type !== 'configure') return;
   const nextUrl = String(message.appUrl || '').replace(/\/$/, '');
+  const nextClientId = String(message.clientId || 'legacy');
+  const nextBrowserName = String(message.browserName || 'Browser');
   activeJobIds = Array.isArray(message.activeJobIds) ? message.activeJobIds : [];
-  if (nextUrl !== appUrl) {
+  if (nextUrl !== appUrl || nextClientId !== clientId || nextBrowserName !== browserName) {
     appUrl = nextUrl;
+    clientId = nextClientId;
+    browserName = nextBrowserName;
     socket?.close();
   }
   connect();

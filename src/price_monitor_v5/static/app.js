@@ -34,11 +34,11 @@ const STATUS_HELP = {
 };
 STATUS_HELP['not-listed'] = 'The completed marketplace pages did not list this shop. This does not mean the shop has no stock.';
 STATUS_HELP.unverified = 'Not verified: one or more marketplace checks are pending, blocked, stopped or incomplete. This is NOT Not found; no conclusion about this shop is possible yet.';
-const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not found, search again with one, then two trailing characters removed (minimum 3 characters, letters and digits). Known S45HE/S45H and S55HE/S55H aliases are accepted; other candidates need review. CAPTCHA, network errors and unknown markup stop automatic fallback.';
+const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not found, search again with one, then two trailing characters removed (minimum 3 characters, letters and digits). Known S45HE/S45H, S55HE/S55H and Q75HE/Q75H aliases are accepted; other plausible variants go to Quick Review. Unrelated prefix matches are rejected.';
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
-  hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. If no match is found, retry with one, then two trailing characters removed. S45HE / S45H and S55HE / S55H are explicit regional aliases; other variants require review, never automatic price acceptance. Delivery time alone does not confirm stock. No retailer pages are opened.',
-  salidzini: 'Auto uses the connected extension and one persistent working tab. Salidzini requests are spaced by at least 12 seconds and a page may stabilize for up to 30 seconds. CAPTCHA pauses the whole automatic batch immediately; two consecutive unavailable pages do the same before more requests are sent. Complete the check in the retained tab, then retry a batch of 5. Manual mode sends no automatic requests. No retailer pages are opened.'
+  hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. One timeout is retried automatically. S45HE/S45H, S55HE/S55H and Q75HE/Q75H are explicit aliases; false prefix candidates are rejected and plausible variants go to Quick Review. Delivery time alone does not confirm stock. No retailer pages are opened.',
+  salidzini: 'Auto uses one active Chrome or Edge extension at a time. A safe browser cycle checks 5, pauses, checks 5, pauses, then checks 10. CAPTCHA or two blank pages starts a protective cooldown; use Test Salidzini session before continuing or switch to the connected standby browser. No parallel requests, CAPTCHA solving or retailer-page visits.'
 };
 function parsingInfo(key, label = key) {
   const help = PARSING_HELP[key] ? [PARSING_HELP[key], SEARCH_FALLBACK_HELP].map(uiText).join('') : null;
@@ -258,10 +258,12 @@ async function loadBrowserBridge() {
     const detail = current ? ` · checking ${current.shop_key} for ${current.model}` : '';
     const autoNotice = state.salidziniMode !== 'manual' && bridge.connected && !bridge.automatic_salidzini ? ' · Reload the v5.0.8+ extension for Salidzini Auto' : '';
     const transport = bridge.transport === 'websocket' ? ' · live channel' : bridge.transport === 'polling' ? ' · recovery polling' : '';
-    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `Edge extension connected${transport}${detail}${autoNotice}` : 'Extension not connected · Salidzini Auto needs the extension; manual entry remains available'}</span>`;
+    const clients = (bridge.clients || []).filter(client => client.connected);
+    const switches = clients.length > 1 ? `<span class="browser-switches">${clients.map(client => `<button type="button" class="compact ${client.active ? '' : 'secondary'}" data-switch-client="${escapeHtml(client.id)}" ${client.active ? 'disabled' : ''}>${escapeHtml(client.browser_name)}${client.active ? ' · active' : ' · use'}</button>`).join('')}</span>` : '';
+    root.innerHTML = `<span class="bridge-dot"></span><span>${bridge.connected ? `${escapeHtml(bridge.active_browser || 'Browser')} extension connected${transport}${detail}${autoNotice}` : 'Extension not connected · Salidzini Auto needs the extension; manual entry remains available'}</span>${switches}`;
   } catch {
     root.classList.remove('connected');
-    root.innerHTML = '<span class="bridge-dot"></span><span>Edge extension status unavailable</span>';
+    root.innerHTML = '<span class="bridge-dot"></span><span>Browser extension status unavailable</span>';
   }
 }
 async function updateSource(key, enabled) {
@@ -527,8 +529,9 @@ function marketplaceCell(row, openDetails, maximum = false) {
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);
     const offers = (task.offers || []).map((offer, index) => `<div class="v5-offer">${offerLink(offer, priceAnomalyWarning(row, offer.price_eur))}<span>${escapeHtml(offer.availability === 'UNKNOWN' ? 'Availability unknown' : offer.availability.replaceAll('_', ' '))}</span><span class="offer-controls"><button type="button" class="link-action" data-correct-kind="marketplaces" data-correct-item="${task.item_id}" data-correct-source="${escapeHtml(task.marketplace_key)}" data-offer-index="${index}">Edit offer</button><button type="button" class="link-action danger" data-remove-offer="${index}" data-item="${task.item_id}" data-key="${escapeHtml(task.marketplace_key)}">Remove false match</button></span></div>`).join('');
-    const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured exact offers only';
-    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString(uiLocale())) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}</div>`;
+    const coverage = task.coverage === 'complete' ? 'Page coverage complete' : task.coverage === 'accepted_partial' ? 'Collected offers accepted in Quick Review' : task.coverage === 'reported_gap' ? `All visible offers collected — ${escapeHtml(task.coverage_detail || 'marketplace heading count differs')}; this result is refreshed next run` : 'Partial coverage — min/max reflect captured exact offers only';
+    const undo = task.undo_snapshot ? `<button type="button" class="compact secondary" data-undo-review data-item="${task.item_id}" data-key="${escapeHtml(task.marketplace_key)}">Undo last decision</button>` : '';
+    return `<div class="detail-offer"><strong>${escapeHtml(task.marketplace)} · ${task.offers?.length || 0} captured offers</strong><span>${coverage}</span>${offers || '<span>No reliable offers yet.</span>'}<span class="muted">${task.finished_at ? 'Checked ' + escapeHtml(new Date(task.finished_at).toLocaleString(uiLocale())) : 'Queued'}${task.cached ? ' · cached' : ''}</span>${previousDecisionHtml(task.previous_manual_resolution)}${task.error ? `<span class="detail-error">${escapeHtml(task.error)}</span>` : ''}${correctionButton('marketplaces', task.item_id, source?.key || task.marketplace_key)}${undo}</div>`;
   }).join('');
   return `<details class="cell-details marketplace-details" data-detail-key="${escapeHtml(detailKey)}" ${openDetails.has(detailKey) ? 'open' : ''}><summary>${summaries}</summary>${details}</details>`;
 }
@@ -646,8 +649,9 @@ function renderActionRequired(run) {
       ? `<button type="button" data-check-action="wait" ${attrs}>Wait & retry automatically</button>`
       : `<button type="button" data-check-action="retry" ${attrs}>Capture again</button>`;
     const cooldownChoice = cooldown ? `<span class="action-cooldown-choice">Paused until ${escapeHtml(retryAt)}. Choose automatic waiting or enter a manual result now.</span>` : '';
-    const candidates = item.candidate_matches?.length ? `<div class="candidate-matches"><strong>Possible variants — review before entering a price</strong>${item.candidate_matches.map(c => `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a>`).join('')}<span class="muted">These links are suggestions, not confirmed SKU matches.</span></div>` : '';
-    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}${candidates}</div></div><div class="action-item-actions"><button type="button" data-check-action="collect" ${attrs} title="Open the marketplace, complete CAPTCHA if needed, then collect automatically. Closes only after the full result is saved. Requires extension v5.0.9+.">Open &amp; collect</button>${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener" title="Open without automatic capture or closing">Open only</a>` : ''}${retryAction}
+    const candidates = item.candidate_matches?.length ? `<div class="candidate-matches quick-review"><strong>Quick Review · choose the matching product</strong>${item.candidate_matches.slice(0,2).map((c,index) => `<div class="candidate-card"><span class="candidate-number">${index + 1}</span><div><b>${escapeHtml(c.model || c.title)}</b><a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.title)}</a></div><button type="button" data-check-action="accept-candidate" data-candidate-index="${index}" ${attrs}>Use ${index + 1}</button></div>`).join('')}<label class="remember-alias"><input type="checkbox" data-action-field="remember-alias"> Remember this SKU alias for future runs</label><span class="muted">Keyboard: 1/2 selects a candidate, 0 marks Not found. No price is accepted until you choose.</span></div>` : '';
+    const acceptPartial = item.offers?.length && item.coverage === 'partial' ? `<button type="button" class="secondary" data-check-action="accept-partial" ${attrs}>Accept ${item.offers.length} collected offer${item.offers.length === 1 ? '' : 's'}</button>` : '';
+    return `<div class="action-item" data-action-item="${escapeHtml(identity)}"><div class="action-item-heading"><div><span class="action-model"><strong>${escapeHtml(item.model)}</strong>${copyModelButton(item.model)}<span>· ${escapeHtml(item.action_name)}</span></span><span class="muted">${escapeHtml(item.error || 'Browser verification is required before this price can be collected.')}</span>${cooldownChoice}${previousDecisionHtml(item.previous_manual_resolution)}${candidates}</div></div><div class="action-item-actions">${acceptPartial}<button type="button" data-check-action="collect" ${attrs} title="Open the marketplace, complete CAPTCHA if needed, then collect automatically. Closes only after the full result is saved. Requires extension v5.0.9+.">Open &amp; collect</button>${link ? `<a class="button-link secondary" href="${escapeHtml(link)}" target="_blank" rel="noopener" title="Open without automatic capture or closing">Open only</a>` : ''}${retryAction}
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-not-found" ${attrs}>Mark not found</button><span class="action-popover" data-action-popover="not-found" hidden><strong>Confirm not found?</strong><span>This saves a final Not found result for this source.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact danger-fill" data-check-action="confirm-not-found" ${attrs}>Confirm</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-price" ${attrs}>Save manual price</button><span class="action-popover action-form-popover" data-action-popover="price" hidden><label>Price, EUR<input data-action-field="price" inputmode="decimal" value="${escapeHtml(previousPrice)}" placeholder="0.00"></label>${sellerField}<span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-price" ${attrs}>Save price</button></span></span></span>
       <span class="action-control"><button type="button" class="secondary" data-check-action="toggle-link" ${attrs}>Add product link</button><span class="action-popover action-form-popover link-popover" data-action-popover="link" hidden><label>Product or search URL<input data-action-field="url" type="url" value="${escapeHtml(item.product_url || '')}" placeholder="https://…"></label><span class="muted">The link is saved to this SKU and parsed now. Future checks try it first.</span><span class="popover-actions"><button type="button" class="secondary compact" data-check-action="cancel-popover">Cancel</button><button type="button" class="compact" data-check-action="confirm-link" ${attrs}>Save and parse</button></span></span></span></div></div>`;
@@ -707,12 +711,20 @@ async function handleActionDialog(event) {
     if (!urlField.value.trim() || !urlField.checkValidity()) { urlField.reportValidity(); return; }
     payload = { url: urlField.value.trim() };
   }
+  if (action === 'accept-candidate') {
+    payload = { candidate_index: Number(button.dataset.candidateIndex),
+      remember_alias: Boolean(actionItem.querySelector('[data-action-field="remember-alias"]')?.checked) };
+  }
   const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = action === 'collect' ? 'Opening…' : action === 'retry' ? 'Capturing…' : action === 'wait' ? 'Scheduling…' : action === 'confirm-link' ? 'Parsing…' : 'Saving…';
   try {
     const base = `/runs/${encodeURIComponent(state.currentRunId)}/${button.dataset.checkKind}/${button.dataset.itemId}/${encodeURIComponent(button.dataset.sourceKey)}`;
-    if (action === 'collect') {
+    if (action === 'accept-candidate') {
+      await api(`${base}/accept-candidate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    } else if (action === 'accept-partial') {
+      await api(`${base}/accept-partial`, { method: 'POST' });
+    } else if (action === 'collect') {
       await api(`${base}/open-collect`, { method: 'POST' });
       showBanner('success','Open & collect queued. Complete CAPTCHA if shown; the extension continues automatically and closes its tab only after the full result is saved.');
     } else if (action === 'retry') {
@@ -725,10 +737,10 @@ async function handleActionDialog(event) {
       await api(`${base}/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     }
     state.lastActionSignature = '';
-    const message = action === 'retry' ? 'The selected check is capturing again.' : action === 'wait' ? 'The check will retry automatically when the cooldown ends.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
+    const message = action === 'accept-candidate' ? 'Candidate selected and being collected.' : action === 'accept-partial' ? 'Collected offers accepted.' : action === 'retry' ? 'The selected check is capturing again.' : action === 'wait' ? 'The check will retry automatically when the cooldown ends.' : action === 'confirm-link' ? 'Link saved. PriceMonitor is parsing it now.' : 'Manual result saved.';
     const popover = button.closest('.action-popover'); if (popover) { popover.hidden = false; popover.classList.add('saved'); popover.innerHTML = `<span class="popover-success">${CHECK_ICON} ${escapeHtml(message)}</span>`; }
     await pollRun(state.currentRunId);
-    if (action === 'collect' || action === 'retry' || action === 'wait' || action === 'confirm-link') {
+    if (action === 'collect' || action === 'retry' || action === 'wait' || action === 'confirm-link' || action === 'accept-candidate') {
       scheduleRunPolling(state.currentRunId, 1000);
     }
   } catch (error) {
@@ -821,8 +833,9 @@ function renderQueueProgress(execution) {
       : batch.stopped ? uiText('Stopped') : row.remaining ? uiText('Queued') : uiText('Completed');
     const current = `${task} · ${escapeHtml(uiText(`Finished ${row.finished}/${row.total} · waiting ${row.queued} · checking ${row.running} · review ${row.needs_review}`))}`;
     const eta = row.remaining && row.eta_seconds ? uiText(`ETA ${formatDuration(row.eta_seconds)}`) : `${row.finished}/${row.total}`;
-    const protection = row.protection_paused ? `<span class="queue-protection">${escapeHtml(uiText('Protection pause · no more automatic requests in this batch'))}</span>` : '';
-    return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}${protection}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
+    const health = row.marketplace_key === 'salidzini' ? `<span class="muted">Safe Auto: ${row.safe_pages || 0}/20 pages in this browser cycle${row.cooldown_until ? ` · cooldown until ${escapeHtml(new Date(row.cooldown_until).toLocaleTimeString(uiLocale()))}` : ''}</span>` : '';
+    const protection = row.protection_paused ? `<span class="queue-protection">${escapeHtml(uiText(row.protection_reason || 'Protection pause · no more automatic requests in this batch'))}</span>` : '';
+    return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}${health}${protection}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
   }).join('');
 }
 
@@ -848,6 +861,7 @@ function renderRun(run) {
     byId('clear-run').disabled = true;
     byId('retry-unresolved').disabled = true;
     byId('retry-salidzini').disabled = true;
+    byId('test-salidzini').disabled = true;
     byId('export-run').disabled = true;
     byId('stop-run').hidden = true;
     byId('stop-run').disabled = false;
@@ -875,9 +889,9 @@ function renderRun(run) {
   const stopped = run.status === 'INCOMPLETE';
   byId('run-state').textContent = run.status === 'RUNNING' ? `Monitoring… Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}` : `${stopped ? 'Stopped' : 'Completed'} · Success ${success} · Not found ${notFound} · Failed ${failed}${actionText}`;
   const includeNotFound = byId('retry-include-not-found').checked;
-  const retryable = state.tasks.filter(task => ['ACTION_REQUIRED','FAILED','INCOMPLETE'].includes(task.status) || (includeNotFound && task.status === 'NOT_FOUND'));
+  const retryable = state.tasks.filter(task => task.retry_class === 'transient' || (includeNotFound && task.status === 'NOT_FOUND'));
   const salidziniRetryable = retryable.some(task => task.marketplace_key === 'salidzini');
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('retry-unresolved').disabled = run.status === 'RUNNING' || !retryable.length; byId('retry-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('retry-marketplace').disabled = run.status === 'RUNNING'; byId('retry-limit').disabled = run.status === 'RUNNING'; byId('retry-include-not-found').disabled = run.status === 'RUNNING'; byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('retry-unresolved').disabled = run.status === 'RUNNING' || !retryable.length; byId('retry-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('test-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('retry-marketplace').disabled = run.status === 'RUNNING'; byId('retry-limit').disabled = run.status === 'RUNNING'; byId('retry-include-not-found').disabled = run.status === 'RUNNING'; byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
   if (run.status !== 'RUNNING') {
     if (state.runPoll) { clearTimeout(state.runPoll); state.runPoll = null; }
     if (previousStatus !== run.status) { loadExports(); loadMonitoringHistory(); }
@@ -994,6 +1008,16 @@ async function retryUnresolved(marketplaceOverride = null) {
   finally { button.textContent = originalText; }
 }
 
+async function testSalidziniSession() {
+  if (!state.currentRunId || byId('test-salidzini').disabled) return;
+  const button = byId('test-salidzini'); button.disabled = true;
+  try {
+    const result = await api(`/runs/${encodeURIComponent(state.currentRunId)}/salidzini/health-check`, {method:'POST'});
+    showBanner('success', result.checks_started ? `Testing Salidzini with ${result.model}.` : result.detail);
+    if (result.checks_started) scheduleRunPolling(state.currentRunId,700);
+  } catch (error) { showBanner('error',error.message); }
+}
+
 function exportCurrentRun() {
   if (!state.currentRunId || byId('export-run').disabled) return;
   const link = document.createElement('a');
@@ -1042,10 +1066,33 @@ async function clearCatalog(event) {
 }
 
 function wireEvents() {
+  byId('browser-bridge-state').addEventListener('click', async event => {
+    const button = event.target.closest('[data-switch-client]'); if (!button) return;
+    button.disabled = true;
+    try { await api('/browser-bridge/active-client',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({client_id:button.dataset.switchClient})}); await loadBrowserBridge(); showBanner('success','Active browser switched. New capture jobs will use this browser.'); }
+    catch (error) { button.disabled = false; showBanner('error',error.message); }
+  });
+  document.addEventListener('keydown', event => {
+    if (!byId('action-dialog').open || /INPUT|SELECT|TEXTAREA/.test(event.target.tagName)) return;
+    const item = byId('action-items').querySelector('.action-item');
+    if (!item) return;
+    const target = event.key === '1' || event.key === '2'
+      ? item.querySelector(`[data-check-action="accept-candidate"][data-candidate-index="${Number(event.key)-1}"]`)
+      : event.key === '0' ? item.querySelector('[data-check-action="toggle-not-found"]') : null;
+    if (target) { event.preventDefault(); target.click(); }
+  });
   document.querySelectorAll('[data-clear-catalog]').forEach(button => button.addEventListener('click', () => openCatalogClear(button.dataset.clearCatalog)));
   document.querySelectorAll('[data-cancel-catalog-clear]').forEach(button => button.addEventListener('click', () => byId('catalog-clear-dialog').close()));
   byId('catalog-clear-form').addEventListener('submit', clearCatalog);
   byId('result-rows').addEventListener('click', async event => {
+    const undo = event.target.closest('[data-undo-review]');
+    if (undo) {
+      try {
+        await api(`/runs/${encodeURIComponent(state.currentRunId)}/marketplaces/${undo.dataset.item}/${encodeURIComponent(undo.dataset.key)}/undo`, {method:'POST'});
+        await pollRun(state.currentRunId); showBanner('success','Last review decision restored.');
+      } catch (error) { showBanner('error', error.message); }
+      return;
+    }
     const button = event.target.closest('[data-remove-offer]');
     if (!button) return;
     if (!window.confirm(uiText('Remove this false match from the current run?'))) return;
@@ -1066,7 +1113,7 @@ function wireEvents() {
   byId('result-rows').addEventListener('click', refreshOneModel); byId('result-rows').addEventListener('click', openResultCorrection); byId('monitoring-history').addEventListener('click', openHistoryRun); byId('refresh-history').addEventListener('click', loadMonitoringHistory);
   document.addEventListener('click', event => { const button = event.target.closest('[data-copy-model],[data-copy-input]'); if (button && !button.closest('#action-items')) copyModel(button); });
   byId('workbook-file').addEventListener('change', event => updateFileName(event.target)); byId('stock-file').addEventListener('change', event => updateFileName(event.target));
-  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('retry-unresolved').addEventListener('click', () => retryUnresolved()); byId('retry-salidzini').addEventListener('click', () => retryUnresolved('salidzini')); byId('retry-include-not-found').addEventListener('change', () => { if (state.currentRunId) pollRun(state.currentRunId); }); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
+  byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('retry-unresolved').addEventListener('click', () => retryUnresolved()); byId('retry-salidzini').addEventListener('click', () => retryUnresolved('salidzini')); byId('test-salidzini').addEventListener('click', testSalidziniSession); byId('retry-include-not-found').addEventListener('change', () => { if (state.currentRunId) pollRun(state.currentRunId); }); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
   document.addEventListener('click', event => { if (!event.target.closest('.run-clear-control')) byId('clear-run-popover').hidden = true; });
   byId('run-mode').addEventListener('change', updateRunModeHelp);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));

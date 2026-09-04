@@ -73,6 +73,8 @@ def create_app(settings=None, store=None, transport=None):
                 "browser_bridge":bridge.status(),"polite_monitoring":{"delay_seconds":[3,3],
                     "salidzini_browser_delay_seconds":monitor.salidzini_delay,
                     "salidzini_page_timeout_seconds":30,"salidzini_circuit_breaker_failures":2,
+                    "salidzini_safe_cycle_pages":[5,5,10],"salidzini_cycle_pauses_seconds":[45,90],
+                    "salidzini_blank_page_cooldown_seconds":3000,
                     "cache_ttl_seconds":14400,"negative_cache_ttl_seconds":0,
                     "cooldown_seconds":600,"browser_concurrency":1}}
 
@@ -87,26 +89,27 @@ def create_app(settings=None, store=None, transport=None):
             raise HTTPException(403,"Bundled extension only")
 
     @app.post("/browser-bridge/heartbeat")
-    async def heartbeat(request: Request, auto_salidzini: bool=False, open_collect: bool=False):
+    async def heartbeat(request: Request, auto_salidzini: bool=False, open_collect: bool=False,
+                        client_id: str="legacy", browser_name: str="Browser"):
         extension(request)
-        bridge.heartbeat(auto_salidzini, open_collect)
+        bridge.heartbeat(auto_salidzini, open_collect, client_id, browser_name)
         return bridge.status()
 
     @app.get("/browser-bridge/jobs/next")
-    async def next_job(request: Request, wait_seconds: float=25):
+    async def next_job(request: Request, wait_seconds: float=25, client_id: str="legacy", browser_name: str="Browser"):
         extension(request)
-        job = await bridge.next_job(wait_seconds)
+        job = await bridge.next_job(wait_seconds,client_id,browser_name)
         return JSONResponse(job) if job else Response(status_code=204)
 
-    def submit(job_id, payload):
+    def submit(job_id, payload, client_id="legacy"):
         if len(str(payload.get("html", ""))) > 8_000_000:
             raise ValueError("Captured page exceeds 8 MB")
-        return bridge.submit(job_id,payload)
+        return bridge.submit(job_id,payload,client_id)
 
     @app.post("/browser-bridge/jobs/{job_id}/result")
-    async def result(job_id: str, request: Request, payload: dict=Body(...)):
+    async def result(job_id: str, request: Request, payload: dict=Body(...), client_id: str="legacy"):
         extension(request)
-        if not submit(job_id,payload):
+        if not submit(job_id,payload,client_id):
             raise HTTPException(404,"Job already completed or stopped")
         return {"accepted":True}
 
@@ -121,10 +124,12 @@ def create_app(settings=None, store=None, transport=None):
             await ws.close(code=1008)
             return
         await ws.accept()
-        bridge.heartbeat(ws.query_params.get('auto_salidzini') == '1', ws.query_params.get('open_collect') == '1')
-        bridge.websocket_connected()
+        client_id = ws.query_params.get('client_id') or 'legacy'
+        browser_name = ws.query_params.get('browser_name') or 'Browser'
+        bridge.heartbeat(ws.query_params.get('auto_salidzini') == '1', ws.query_params.get('open_collect') == '1',client_id,browser_name)
+        bridge.websocket_connected(client_id,browser_name)
         receiver = asyncio.create_task(ws.receive_json())
-        sender = asyncio.create_task(bridge.next_job(25))
+        sender = asyncio.create_task(bridge.next_job(25,client_id,browser_name))
         try:
             await ws.send_json({"type":"ready","status":bridge.status()})
             while True:
@@ -133,9 +138,9 @@ def create_app(settings=None, store=None, transport=None):
                     await ws.send_json({"type":"ping"})
                 if receiver in done:
                     message = receiver.result()
-                    bridge.heartbeat()
+                    bridge.heartbeat(client_id=client_id,browser_name=browser_name)
                     if message.get("type") == "result":
-                        submit(str(message.get("job_id")),message.get("payload") or {})
+                        submit(str(message.get("job_id")),message.get("payload") or {},client_id)
                     else:
                         await ws.send_json({"type":"ack"})
                     receiver = asyncio.create_task(ws.receive_json())
@@ -143,13 +148,19 @@ def create_app(settings=None, store=None, transport=None):
                     job = sender.result()
                     if job:
                         await ws.send_json({"type":"job","job":job})
-                    sender = asyncio.create_task(bridge.next_job(25))
+                    sender = asyncio.create_task(bridge.next_job(25,client_id,browser_name))
         except (WebSocketDisconnect,RuntimeError,ValueError):
             pass
         finally:
             receiver.cancel(); sender.cancel()
             await asyncio.gather(receiver,sender,return_exceptions=True)
-            bridge.websocket_disconnected()
+            bridge.websocket_disconnected(client_id)
+
+    @app.post("/browser-bridge/active-client")
+    async def active_browser(payload: dict=Body(...)):
+        result = bridge.set_active_client(payload.get("client_id"))
+        monitor.reset_salidzini_browser_cycle()
+        return result
 
     @app.get("/sources")
     async def sources():
@@ -328,6 +339,22 @@ def create_app(settings=None, store=None, transport=None):
     async def resolve(run_id: str,item_id: int,key: str,payload: dict=Body(...)):
         return await monitor.resolve(run_id,item_id,key,payload)
 
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/accept-candidate")
+    async def accept_candidate(run_id: str,item_id: int,key: str,payload: dict=Body(...)):
+        catalog.resume_monitoring_session(run_id)
+        task = catalog.check(run_id,item_id,key)
+        monitor.begin_batch(run_id,[task],f"Quick Review {task['source_model']}")
+        await monitor.accept_candidate(run_id,item_id,key,payload)
+        return {"status":"PENDING"}
+
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/accept-partial")
+    async def accept_partial(run_id: str,item_id: int,key: str):
+        return await monitor.accept_partial(run_id,item_id,key)
+
+    @app.post("/runs/{run_id}/marketplaces/{item_id}/{key}/undo")
+    async def undo_review(run_id: str,item_id: int,key: str):
+        return await monitor.undo(run_id,item_id,key)
+
     @app.delete("/runs/{run_id}/marketplaces/{item_id}/{key}/offers/{index}")
     async def remove_offer(run_id: str,item_id: int,key: str,index: int):
         task = catalog.check(run_id,item_id,key)
@@ -375,8 +402,22 @@ def create_app(settings=None, store=None, transport=None):
         tasks = [task for task in catalog.checks(run_id)
                  if task["marketplace_key"] in enabled and task.get("status") in statuses
                  and source_key in {"all",task["marketplace_key"]}]
+        def retry_class(task):
+            message = str(task.get("error") or "").lower()
+            if task.get("candidate_matches") or (task.get("offers") and task.get("coverage") == "partial"):
+                return "review"
+            if task.get("status") in {"ACTION_REQUIRED","FAILED","INCOMPLETE","NOT_FOUND"} or task.get("error_code") == "NETWORK_UNAVAILABLE" or any(
+                marker in message for marker in ("timeout","timed out","did not become ready","page loading","no request was sent","connection failed")
+            ):
+                return "transient"
+            return "none"
+        # Deterministic ambiguities belong in Quick Review. Re-running them in
+        # every automatic batch wastes time and made the queue repeatedly start
+        # on the same model.
+        tasks = [task for task in tasks if retry_class(task) == "transient"]
         priority = {"ACTION_REQUIRED": 0, "FAILED": 1, "INCOMPLETE": 2, "NOT_FOUND": 3}
-        tasks.sort(key=lambda task:(priority.get(task.get("status"),9),task["source_model"],task["marketplace_key"]))
+        tasks.sort(key=lambda task:(int(task.get("retry_count") or 0), task.get("last_retry_at") or "",
+                                    priority.get(task.get("status"),9),task["source_model"],task["marketplace_key"]))
         tasks = tasks[:limit]
         if tasks:
             catalog.resume_monitoring_session(run_id)
@@ -386,6 +427,28 @@ def create_app(settings=None, store=None, transport=None):
             await monitor.retry(run_id, task["item_id"], task["marketplace_key"], capture=False)
             count += 1
         return {"checks_started": count, "status": "PENDING" if count else "UNCHANGED"}
+
+    @app.post("/runs/{run_id}/salidzini/health-check")
+    async def salidzini_health_check(run_id: str):
+        if any(ident[0] == run_id for ident in monitor.jobs):
+            raise HTTPException(409,"Wait for the active batch or stop it first")
+        if not bridge.connected or not bridge.automatic_salidzini:
+            raise ValueError("Connect the v5 extension in the browser you want to test")
+        guard = monitor.salidzini_state(run_id)
+        if guard.get("cooldown_until") and guard["cooldown_until"] > utc_now():
+            raise ValueError(f"This browser session is cooling down until {guard['cooldown_until']}. Switch to the connected standby browser or wait.")
+        guard.update(paused=False,reason=None,cooldown_until=None)
+        tasks = [task for task in catalog.checks(run_id) if task["marketplace_key"] == "salidzini"
+                 and task.get("status") in {"ACTION_REQUIRED","FAILED","INCOMPLETE"}
+                 and not task.get("candidate_matches") and not task.get("offers")]
+        tasks.sort(key=lambda task:(int(task.get("retry_count") or 0),task.get("last_retry_at") or "",task["source_model"]))
+        if not tasks:
+            return {"checks_started":0,"status":"HEALTHY","detail":"No transient Salidzini checks remain"}
+        task = tasks[0]
+        catalog.resume_monitoring_session(run_id)
+        monitor.begin_batch(run_id,[task],f"Salidzini health check · {task['source_model']}")
+        await monitor.retry(run_id,task["item_id"],"salidzini",capture=False)
+        return {"checks_started":1,"status":"PENDING","model":task["source_model"]}
 
     @app.get("/runs/{run_id}/export")
     async def export(run_id: str):
