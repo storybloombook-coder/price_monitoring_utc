@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $pmRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pmPython = Join-Path $pmRoot '.venv/Scripts/python.exe'
 $pmBuild = Join-Path $pmRoot 'build/v5-package'
-$pmName = 'PriceMonitor-v5.0.15-windows-x64-portable'
+$pmName = 'PriceMonitor-v5.0.16-windows-x64-portable'
 $pmPortable = Join-Path (Join-Path $pmRoot 'dist') $pmName
 Push-Location $pmRoot
 try {

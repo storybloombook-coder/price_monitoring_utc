@@ -244,12 +244,13 @@
     [/^Price warning: (\d+)% above the lowest collected price \((.+)\)\. Verify the exact model\.$/, m => `Предупреждение: цена на ${m[1]}% выше минимальной собранной цены (${m[2]}). Проверьте точную модель.`],
     [/^Price warning: (\d+)% below the next collected price \((.+)\)\. Verify the exact model\.$/, m => `Предупреждение: цена на ${m[1]}% ниже следующей собранной цены (${m[2]}). Проверьте точную модель.`],
     [/^Incomplete Salidzini coverage: (.+)\. Review remaining or ambiguous listings\.$/, m => `Неполное покрытие Salidzini: ${m[1]}. Проверьте оставшиеся или неоднозначные позиции.`],
+    [/^Coverage notice: (.+)\. Min\/max prices use the exact offers collected during this check; this partial result is not reused from cache\.$/, m => `Информация об охвате: ${m[1]}. Минимальная и максимальная цены рассчитаны по точным предложениям, собранным во время этой проверки; неполный результат не используется повторно из кеша.`],
     [/^Shortened searches found possible model variants\.(.*)$/, m => `Сокращённый поиск нашёл возможные варианты модели.${m[1]}`],
     [/^Network connection failed before the marketplace could be read\.(.*)$/, m => `Не удалось подключиться к сети до чтения маркетплейса.${m[1]}`]
   ];
 
   const PHRASES = [
-    ['marketplace checks', 'проверок маркетплейсов'], ['Action required', 'Требуется действие'],
+    ['marketplace checks', 'проверок маркетплейсов'], ['Coverage notice', 'Информация об охвате'], ['Action required', 'Требуется действие'],
     ['Not found', 'Не найдено'], ['Availability unknown', 'Наличие неизвестно'],
     ['Out of stock', 'Нет в наличии'], ['In stock', 'В наличии'], ['Pre-order', 'Предзаказ'],
     ['Monitoring…', 'Мониторинг…'], ['Success', 'Успешно'], ['Failed', 'Ошибки'],

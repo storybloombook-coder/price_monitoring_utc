@@ -274,7 +274,12 @@ class MarketplaceMonitor:
                         # most two. There is nothing else for the browser tab to
                         # capture, so the saved result may close it just like a
                         # fully reconciled result. It is deliberately not cached.
-                        complete = task['status'] in {'SUCCESS','NOT_FOUND'} and task.get('coverage') in {'complete','reported_gap'}
+                        # Exact offers are useful even when the marketplace's
+                        # own heading/count cannot be fully reconciled.  The
+                        # result carries its coverage warning in the table, so
+                        # there is no manual confirmation step merely to make
+                        # already-collected prices visible.
+                        complete = task['status'] in {'SUCCESS','NOT_FOUND'}
                         self.bridge.finish_verification(verification, 'complete' if complete else 'review',
                                                         status=task['status'], error=task.get('error'))
                     if retry_timeout:
@@ -459,9 +464,14 @@ class MarketplaceMonitor:
         task.update(offers=list(unique.values()),collection_method="extension" if capture else "marketplace HTML",attempts=task.get("attempts",0)+len(seen),
                     coverage="partial" if partial or queue else "reported_gap" if reported_gap else "complete", retry_after=None)
         if offers:
-            task["status"] = "ACTION_REQUIRED" if partial or queue else "SUCCESS"
-            task["error"] = (('Incomplete Salidzini coverage: ' + task['coverage_detail'] + '. Review remaining or ambiguous listings.')
-                             if key == 'salidzini' else "Some offers/pages need review; displayed prices cover captured offers only") if partial or queue else None
+            # Salidzini regularly reports a heading count that differs from
+            # its rendered cards. Publish its confidently matched offers
+            # immediately; partial coverage remains explicit, is never cached,
+            # and is surfaced through an information marker in the table.
+            # Other marketplaces retain the strict review requirement.
+            publish_partial = key == 'salidzini'
+            task["status"] = "SUCCESS" if publish_partial or not (partial or queue) else "ACTION_REQUIRED"
+            task["error"] = None if publish_partial or not (partial or queue) else "Some offers/pages need review; displayed prices cover captured offers only"
         elif empty and not partial:
             task.update(status="NOT_FOUND",error=None)
         else:

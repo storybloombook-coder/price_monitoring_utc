@@ -88,17 +88,17 @@ def test_salidzini_latvian_empty_result_is_final_not_found():
     assert parsed["not_found"] and not parsed["partial"] and not parsed["offers"]
 
 
-@pytest.mark.parametrize('html,expected', [
-    (REAL_CARDS, 'ACTION_REQUIRED'),
-    (REAL_COUNTED.replace('3 preces','6 preces'), 'ACTION_REQUIRED'),
-    (REAL_COUNTED.replace('12999,00','bad price',1), 'ACTION_REQUIRED'),
+@pytest.mark.parametrize('html', [
+    REAL_CARDS,
+    REAL_COUNTED.replace('3 preces','6 preces'),
+    REAL_COUNTED.replace('12999,00','bad price',1),
 ])
-def test_coverage_outcome_distinguishes_complete_from_incomplete(tmp_path,html,expected):
+def test_incomplete_coverage_publishes_exact_offers_with_warning_metadata(tmp_path,html):
     async def scenario():
         _,task=await collect(CatalogStore(tmp_path/'db'),FakeBridge(html))
-        assert task['offers'] and task['status'] == expected
-        if expected == 'ACTION_REQUIRED':
-            assert 'coverage' in task['error']
+        assert task['offers'] and task['status'] == 'SUCCESS'
+        assert task['coverage'] == 'partial'
+        assert task['error'] is None
     asyncio.run(scenario())
 
 

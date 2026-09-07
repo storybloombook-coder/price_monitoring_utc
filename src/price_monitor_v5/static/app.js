@@ -516,6 +516,14 @@ function correctionButton(kind, itemId, sourceKey) {
   return `<button type="button" class="compact secondary correct-result-button" data-correct-kind="${escapeHtml(kind)}" data-correct-item="${itemId}" data-correct-source="${escapeHtml(sourceKey)}">Add seller offer / review</button>`;
 }
 
+function coverageInfo(task, suffix = '') {
+  if (!task || task.coverage === 'complete') return '';
+  const detail = task.coverage_detail || 'The marketplace result count could not be fully reconciled.';
+  const message = `Coverage notice: ${detail}. Min/max prices use the exact offers collected during this check; this partial result is not reused from cache.`;
+  const id = `coverage-${task.item_id}-${task.marketplace_key}-${suffix}`;
+  return `<span class="parsing-info coverage-info"><button type="button" class="info-button" aria-label="${escapeHtml(uiText('Coverage notice'))}" aria-describedby="${escapeHtml(id)}">i</button><span role="tooltip" id="${escapeHtml(id)}">${escapeHtml(uiText(message))}</span></span>`;
+}
+
 function marketplaceCell(row, openDetails, maximum = false) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces:${maximum ? 'max' : 'min'}`;
@@ -524,7 +532,7 @@ function marketplaceCell(row, openDetails, maximum = false) {
     const availabilityNote = offer ? ` · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
     const coverageNote = task.coverage === 'reported_gap' ? ' · all visible offers collected; marketplace count differs' : task.coverage !== 'complete' ? ' · partial' : '';
     const note = availabilityNote + coverageNote;
-    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${escapeHtml(note)}</small></span>`;
+    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}${coverageInfo(task, maximum ? 'max' : 'min')}<small>${escapeHtml(note)}</small></span>`;
   }).join('');
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);

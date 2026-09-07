@@ -347,6 +347,9 @@ dialog form { padding: 20px; }
 .badge.unverified { color: #895c13; background: #fff4d5; }
 #direct-shop-links[hidden] { display: none !important; }
 .marketplace-summary-offer small { display: block; color: #8a651a; }
+.marketplace-summary-offer .coverage-info { margin-left: 5px; vertical-align: middle; }
+.marketplace-summary-offer .coverage-info .info-button { width: 18px; height: 18px; font-size: 11px; }
+.marketplace-summary-offer .coverage-info [role="tooltip"] { left: auto; right: -8px; width: min(360px,70vw); text-align: left; }
 .salidzini-mode { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); }
 .salidzini-mode select { width:auto; padding:5px 8px; border:1px solid var(--line); border-radius:16px; background:var(--surface); color:var(--text); }
 .browser-switches { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }

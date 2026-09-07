@@ -24,7 +24,7 @@ def test_second_launch_opens_existing_instance_without_starting_server(monkeypat
     monkeypatch.setattr(launcher, "open_application_page", lambda url: opened.append(url))
     monkeypatch.setattr(launcher.uvicorn, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Must reuse server")))
     launcher.main()
-    assert opened == ["http://127.0.0.1:8050/?v=5.0.15"]
+    assert opened == ["http://127.0.0.1:8050/?v=5.0.16"]
 
 
 def test_browser_waits_for_health(monkeypatch):
@@ -135,7 +135,7 @@ def test_index_is_not_cached_between_versions(tmp_path):
         response = client.get("/")
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
-        assert "v5.0.15" in response.text
+        assert "v5.0.16" in response.text
         policy = client.get("/health").json()["polite_monitoring"]
         assert policy["salidzini_browser_delay_seconds"] == 12
         assert policy["salidzini_page_timeout_seconds"] == 30

@@ -66,14 +66,15 @@ def test_all_marketplaces_use_same_confirmed_save_contract(tmp_path,key,model,ur
     asyncio.run(scenario())
 
 
-def test_partial_capture_keeps_prices_but_never_authorizes_closure(tmp_path):
+def test_partial_capture_publishes_prices_and_authorizes_closure_with_coverage_notice(tmp_path):
     async def scenario():
         store,item,bridge,monitor=setup(tmp_path)
         token=await monitor.retry('one',item['id'],'salidzini',open_collect=True)
         await reply(bridge,REAL_CARDS)
         await asyncio.gather(*monitor.jobs.values())
-        assert bridge.verification(token)['state']=='review'
-        assert store.check('one',item['id'],'salidzini')['offers']
+        assert bridge.verification(token)['state']=='complete'
+        task=store.check('one',item['id'],'salidzini')
+        assert task['offers'] and task['status']=='SUCCESS' and task['coverage']=='partial'
     asyncio.run(scenario())
 
 

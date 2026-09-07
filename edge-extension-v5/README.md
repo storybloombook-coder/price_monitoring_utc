@@ -1,6 +1,6 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.15
+# PriceMonitor v5 Marketplace Bridge · 5.0.16
 
-In 5.0.15 every Chrome/Edge installation has its own local client identity.
+In 5.0.16 every Chrome/Edge installation has its own local client identity.
 PriceMonitor selects exactly one active browser; a second connected browser is
 standby and cannot consume the same job. Switch only from the application while
 no capture is active. Salidzini Auto uses a guarded 5 + 5 + 10 page cycle with
