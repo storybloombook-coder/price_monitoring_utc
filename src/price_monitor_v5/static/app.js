@@ -1009,7 +1009,8 @@ async function retryUnresolved(marketplaceOverride = null) {
       body: JSON.stringify({ include_not_found: byId('retry-include-not-found').checked,
         marketplace_key: sourceKey, limit: Number(byId('retry-limit').value) })
     });
-    showBanner('success', result.checks_started ? `${result.checks_started} unresolved checks queued.` : 'No unresolved checks matched the selected sources.');
+    const pass = sourceKey === 'salidzini' && result.retry_round ? ` Retry pass ${result.retry_round} will not roll over to previously visited models.` : '';
+    showBanner('success', result.checks_started ? `${result.checks_started} unresolved checks queued.${pass}` : 'No unresolved checks matched the selected sources.');
     await pollRun(state.currentRunId);
     if (result.checks_started) scheduleRunPolling(state.currentRunId, 700);
   } catch (error) { showBanner('error', error.message); }

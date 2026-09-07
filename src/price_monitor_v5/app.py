@@ -418,6 +418,16 @@ def create_app(settings=None, store=None, transport=None):
         priority = {"ACTION_REQUIRED": 0, "FAILED": 1, "INCOMPLETE": 2, "NOT_FOUND": 3}
         tasks.sort(key=lambda task:(int(task.get("retry_count") or 0), task.get("last_retry_at") or "",
                                     priority.get(task.get("status"),9),task["source_model"],task["marketplace_key"]))
+        retry_round = None
+        if source_key == "salidzini" and tasks:
+            # Never roll a Salidzini batch into the next pass. If only two SKUs
+            # remain untouched in pass 1, queue those two instead of filling the
+            # requested batch with eight SKUs from the beginning of pass 2.
+            # A later explicit click may start the next pass, but a single click
+            # can never cycle back to models it has already visited.
+            current_retry_count = int(tasks[0].get("retry_count") or 0)
+            tasks = [task for task in tasks if int(task.get("retry_count") or 0) == current_retry_count]
+            retry_round = current_retry_count + 1
         tasks = tasks[:limit]
         if tasks:
             catalog.resume_monitoring_session(run_id)
@@ -426,7 +436,8 @@ def create_app(settings=None, store=None, transport=None):
         for task in tasks:
             await monitor.retry(run_id, task["item_id"], task["marketplace_key"], capture=False)
             count += 1
-        return {"checks_started": count, "status": "PENDING" if count else "UNCHANGED"}
+        return {"checks_started": count, "status": "PENDING" if count else "UNCHANGED",
+                "retry_round": retry_round}
 
     @app.post("/runs/{run_id}/salidzini/health-check")
     async def salidzini_health_check(run_id: str):

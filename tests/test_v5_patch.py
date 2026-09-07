@@ -24,7 +24,7 @@ def test_second_launch_opens_existing_instance_without_starting_server(monkeypat
     monkeypatch.setattr(launcher, "open_application_page", lambda url: opened.append(url))
     monkeypatch.setattr(launcher.uvicorn, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Must reuse server")))
     launcher.main()
-    assert opened == ["http://127.0.0.1:8050/?v=5.0.17"]
+    assert opened == ["http://127.0.0.1:8050/?v=5.0.18"]
 
 
 def test_browser_waits_for_health(monkeypatch):
@@ -123,10 +123,27 @@ def test_retry_unresolved_is_filtered_bounded_and_resumes_stopped_run(tmp_path):
         })
         assert response.status_code == 200 and response.json()["checks_started"] == 5
         assert len(scheduled) == 5 and {item[0] for item in scheduled} == {"salidzini"}
-        assert store.monitoring_session("retry-batch")["stopped_at"] is None
+        assert response.json()["retry_round"] == 1
         progress = client.get("/runs/retry-batch").json()["execution"]["queue_progress"]
         assert progress["marketplaces"][0]["total"] == 5
         assert progress["marketplaces"][0]["queued"] == 5
+        # Simulate the first five checks remaining unresolved. Only the one SKU
+        # still untouched in pass 1 may enter the next batch; the endpoint must
+        # not fill that batch by returning to the beginning of pass 2.
+        for task in store.checks("retry-batch"):
+            if task["marketplace_key"] == "salidzini" and task.get("retry_count") == 1:
+                task.update(status="ACTION_REQUIRED", error="still unavailable")
+                store.save_check(task)
+        response = client.post("/runs/retry-batch/retry-unresolved", json={
+            "marketplace_key": "salidzini", "limit": 5, "include_not_found": False,
+        })
+        assert response.status_code == 200 and response.json()["checks_started"] == 1
+        assert response.json()["retry_round"] == 1
+        assert len(scheduled) == 6
+        assert store.monitoring_session("retry-batch")["stopped_at"] is None
+        progress = client.get("/runs/retry-batch").json()["execution"]["queue_progress"]
+        assert progress["marketplaces"][0]["total"] == 1
+        assert progress["marketplaces"][0]["queued"] == 1
         assert client.post("/runs/retry-batch/retry-unresolved", json={"limit": 7}).status_code == 400
 
 
@@ -135,7 +152,7 @@ def test_index_is_not_cached_between_versions(tmp_path):
         response = client.get("/")
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
-        assert "v5.0.17" in response.text
+        assert "v5.0.18" in response.text
         policy = client.get("/health").json()["polite_monitoring"]
         assert policy["salidzini_browser_delay_seconds"] == 12
         assert policy["salidzini_page_timeout_seconds"] == 30
