@@ -38,7 +38,7 @@ const SEARCH_FALLBACK_HELP = ' On every marketplace, if the original SKU is not 
 const PARSING_HELP = {
   kaina24: 'Search TCL + model, then read current seller rows on the Kaina24 comparison page. Cash price and per-seller availability are read separately; delivery, installments, duplicate ads and sold-out history are excluded. Senukai uses its displayed SMART NET loyalty price. Saved comparison links are tried first. No retailer pages are opened; protection pauses requests.',
   hinnavaatlus: 'Search TCL + model and read seller offers on the matching comparison page. One timeout is retried automatically. S45HE/S45H, S55HE/S55H and Q75HE/Q75H are explicit aliases; false prefix candidates are rejected and plausible variants go to Quick Review. Delivery time alone does not confirm stock. No retailer pages are opened.',
-  salidzini: 'Auto uses one active Chrome or Edge extension at a time. A safe browser cycle checks 5, pauses, checks 5, pauses, then checks 10. CAPTCHA or two blank pages starts a protective cooldown; use Test Salidzini session before continuing or switch to the connected standby browser. No parallel requests, CAPTCHA solving or retailer-page visits.'
+  salidzini: 'Auto uses one active Chrome or Edge extension at a time. It creates one background Salidzini tab and reuses it by changing the search model; it does not open a new tab for every SKU. Captured prices are saved immediately. A safe browser cycle checks 5, pauses, checks 5, pauses, then checks 10. CAPTCHA or two blank pages starts a protective cooldown; use Test Salidzini session before continuing or switch to the connected standby browser. No parallel requests, CAPTCHA solving or retailer-page visits.'
 };
 function parsingInfo(key, label = key) {
   const help = PARSING_HELP[key] ? [PARSING_HELP[key], SEARCH_FALLBACK_HELP].map(uiText).join('') : null;
@@ -860,7 +860,6 @@ function renderRun(run) {
     state.shopResults.map(item => [item.item_id, item.shop_key, item.status, item.price_eur, item.availability, item.product_url, item.search_url, item.error, item.retry_after, item.cached, item.checked_at]),
   ]);
   const resultsChanged = resultSignature !== state.resultRenderSignature;
-  state.resultRenderSignature = resultSignature;
   if (run.cleared) {
     byId('progress').hidden = true;
     byId('run-state').textContent = 'Table cleared.';
@@ -873,7 +872,7 @@ function renderRun(run) {
     byId('export-run').disabled = true;
     byId('stop-run').hidden = true;
     byId('stop-run').disabled = false;
-    renderResults(); renderActionRequired(run);
+    renderResults(); state.resultRenderSignature = resultSignature; renderActionRequired(run);
     if (state.runPoll) { clearInterval(state.runPoll); state.runPoll = null; }
     return;
   }
@@ -899,7 +898,12 @@ function renderRun(run) {
   const includeNotFound = byId('retry-include-not-found').checked;
   const retryable = state.tasks.filter(task => task.retry_class === 'transient' || (includeNotFound && task.status === 'NOT_FOUND'));
   const salidziniRetryable = retryable.some(task => task.marketplace_key === 'salidzini');
-  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('retry-unresolved').disabled = run.status === 'RUNNING' || !retryable.length; byId('retry-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('test-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('retry-marketplace').disabled = run.status === 'RUNNING'; byId('retry-limit').disabled = run.status === 'RUNNING'; byId('retry-include-not-found').disabled = run.status === 'RUNNING'; byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false; if (resultsChanged) renderResults(); renderActionRequired(run);
+  byId('start-run').disabled = run.status === 'RUNNING'; byId('run-mode').disabled = run.status === 'RUNNING'; byId('clear-run').disabled = !(state.tasks.length || state.shopResults.length); byId('retry-unresolved').disabled = run.status === 'RUNNING' || !retryable.length; byId('retry-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('test-salidzini').disabled = run.status === 'RUNNING' || !salidziniRetryable; byId('retry-marketplace').disabled = run.status === 'RUNNING'; byId('retry-limit').disabled = run.status === 'RUNNING'; byId('retry-include-not-found').disabled = run.status === 'RUNNING'; byId('export-run').disabled = run.status === 'RUNNING' || !(state.tasks.length || state.shopResults.length); byId('stop-run').hidden = run.status !== 'RUNNING'; byId('stop-run').disabled = false;
+  // Commit the signature only after a successful DOM update. If rendering is
+  // interrupted once, the next poll must retry instead of treating stale rows
+  // as current forever.
+  if (resultsChanged) { renderResults(); state.resultRenderSignature = resultSignature; }
+  renderActionRequired(run);
   if (run.status !== 'RUNNING') {
     if (state.runPoll) { clearTimeout(state.runPoll); state.runPoll = null; }
     if (previousStatus !== run.status) { loadExports(); loadMonitoringHistory(); }
@@ -921,6 +925,18 @@ function scheduleRunPolling(runId, delay = pollingDelay()) {
     const run = await pollRun(runId);
     if (run?.status === 'RUNNING' && !state.stopRequested) scheduleRunPolling(runId);
   }, delay);
+}
+
+let visibleRefreshTimer = null;
+function refreshRunWhenVisible() {
+  if (document.hidden || !state.currentRunId) return;
+  clearTimeout(visibleRefreshTimer);
+  visibleRefreshTimer = setTimeout(() => {
+    // Returning from the extension-owned marketplace tab is an authoritative
+    // moment to reconcile the visible table with the persisted run.
+    state.resultRenderSignature = '';
+    pollRun(state.currentRunId);
+  }, 120);
 }
 async function refreshOneModel(event) {
   const button = event.target.closest('[data-refresh-model]');
@@ -1125,6 +1141,8 @@ function wireEvents() {
   byId('workbook-upload').addEventListener('click', () => upload('workbook')); byId('stock-upload').addEventListener('click', () => upload('stock')); byId('start-run').addEventListener('click', startRun); byId('clear-run').addEventListener('click', event => { event.stopPropagation(); if (!byId('clear-run').disabled) byId('clear-run-popover').hidden = false; }); byId('clear-run-cancel').addEventListener('click', () => { byId('clear-run-popover').hidden = true; }); byId('clear-run-confirm').addEventListener('click', clearCurrentTable); byId('retry-unresolved').addEventListener('click', () => retryUnresolved()); byId('retry-salidzini').addEventListener('click', () => retryUnresolved('salidzini')); byId('test-salidzini').addEventListener('click', testSalidziniSession); byId('retry-include-not-found').addEventListener('change', () => { if (state.currentRunId) pollRun(state.currentRunId); }); byId('stop-run').addEventListener('click', hardStopRun); byId('export-run').addEventListener('click', exportCurrentRun);
   document.addEventListener('click', event => { if (!event.target.closest('.run-clear-control')) byId('clear-run-popover').hidden = true; });
   byId('run-mode').addEventListener('change', updateRunModeHelp);
+  window.addEventListener('focus', refreshRunWhenVisible);
+  document.addEventListener('visibilitychange', refreshRunWhenVisible);
   byId('marketplace-master').addEventListener('change', event => updateMaster('marketplace', event.target.checked)); byId('shop-master').addEventListener('change', event => updateMaster('shop', event.target.checked));
   for (const kind of ['source', 'stock']) { let timer; byId(`${kind}-search`).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => loadKind(kind).catch(error => showBanner('error', error.message)), 220); }); }
 }
