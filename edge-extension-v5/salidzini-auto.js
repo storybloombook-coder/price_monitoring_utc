@@ -20,9 +20,13 @@ function salidziniLater(jobId) {
 
 async function automaticJobAlive(record) {
   if ((await settings()).appUrl !== record.appUrl) return false;
+  const {clientId} = await settings();
   const response = await bridgeFetch('/browser-bridge/status', {signal:AbortSignal.timeout(4000)});
   if (!response.ok) throw new Error('Cannot check the active PriceMonitor job');
-  return (await response.json()).jobs.some(job => job.id === record.job.id);
+  const status = await response.json();
+  if (status.active_client_id !== clientId) return false;
+  return status.jobs.some(job => job.id === record.job.id &&
+    (!job.assigned_client_id || job.assigned_client_id === clientId));
 }
 
 async function discardAutomaticJob(jobId, record) {

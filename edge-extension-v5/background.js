@@ -80,6 +80,16 @@ async function heartbeat() {
   return response.json();
 }
 
+async function publishConnectionStatus(live) {
+  const { clientId, browserName } = await settings();
+  const own = (live?.clients || []).find(client => client.id === clientId);
+  if (own && !own.active) {
+    await setStatus('standby', `${browserName} connected as standby · ${live.active_browser || 'another browser'} is active`);
+    return;
+  }
+  await setStatus('connected', `${browserName} connected and active`);
+}
+
 function extractRenderedPage(model) {
   const text = document.body?.innerText || '';
   const securityChallenge = /verify you are human|just a moment|checking your browser/i.test(text) ||
@@ -134,7 +144,9 @@ async function submit(jobId, payload) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload)
   });
-  if (!response.ok && response.status !== 404) throw new Error(`PriceMonitor rejected the browser result (${response.status})`);
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`PriceMonitor rejected the browser result (${response.status})`);
+  return true;
 }
 
 async function removeActiveJob(jobId) {
@@ -148,10 +160,15 @@ async function finishJob(jobId, record, captured, closeTab) {
 }
 async function finishJobNow(jobId, record, captured, closeTab) {
   await chrome.alarms.clear(`${JOB_ALARM_PREFIX}${jobId}`);
-  await submit(jobId, captured);
+  const accepted = await submit(jobId, captured);
   await removeActiveJob(jobId);
   if (record.ruleId && !record.interactive) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [record.ruleId]});
   if (closeTab) await chrome.tabs.remove(record.tabId).catch(() => {});
+  if (!accepted) {
+    await setStatus('standby', `${record.job.model} was not accepted · this browser is standby or the job was stopped`);
+    void pollLoop();
+    return;
+  }
   await setStatus(captured.security_challenge ? 'attention' : 'connected', captured.security_challenge
     ? `Complete or inspect ${record.job.shop_key} in the open tab`
     : `Captured ${record.job.shop_key} for ${record.job.model}`);
@@ -251,10 +268,10 @@ async function pollLoop() {
   if (polling) return;
   polling = true;
   try {
-    await heartbeat();
+    const live = await heartbeat();
     let capacity = MAX_ACTIVE_JOBS - Object.keys(await activeJobs()).length;
     while (capacity > 0 && await pollOnce()) capacity -= 1;
-    if (Object.keys(await activeJobs()).length === 0) await setStatus('connected', 'Connected to PriceMonitor');
+    if (Object.keys(await activeJobs()).length === 0) await publishConnectionStatus(live);
   } catch (error) {
     await setStatus('disconnected', String(error?.message || error));
   } finally {
@@ -263,7 +280,8 @@ async function pollLoop() {
 }
 
 async function resumeJobs() {
-  await heartbeat();
+  const live = await heartbeat();
+  await publishConnectionStatus(live);
   await resumeVerifications();
   for (const jobId of Object.keys(await activeJobs())) void inspectJob(jobId);
 }
@@ -321,8 +339,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void configureLiveChannel();
     } else if (message.type === 'socket-state') {
       void chrome.storage.local.set({ offscreenSocketState: message });
-      void setStatus(message.connected ? 'connected' : 'reconnecting', message.message || 'Updating live channel…');
       if (message.connected) void resumeJobs().catch(() => {});
+      else void setStatus('reconnecting', message.message || 'Updating live channel…');
     } else if (message.type === 'job' && message.job) {
       // The backend has one capture slot. A new job may arrive while the
       // previous result is acknowledged but its local cleanup is still running.

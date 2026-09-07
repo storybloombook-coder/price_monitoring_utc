@@ -55,6 +55,34 @@ def test_two_browser_clients_have_one_active_queue_consumer():
     asyncio.run(scenario())
 
 
+def test_waiting_old_browser_cannot_steal_job_after_switch():
+    async def scenario():
+        bridge = BrowserBridge(timeout_seconds=.5)
+        bridge.heartbeat(True, True, "chrome-1", "Chrome")
+        bridge.heartbeat(True, True, "edge-1", "Edge")
+        stale_waiter = asyncio.create_task(bridge.next_job(.3, "chrome-1", "Chrome"))
+        await asyncio.sleep(.01)
+        bridge.set_active_client("edge-1")
+        capture = asyncio.create_task(bridge.capture("salidzini", "25G64", "https://www.salidzini.lv/cena?q=25G64"))
+        assert await stale_waiter is None
+        job = await bridge.next_job(.2, "edge-1", "Edge")
+        assert job["assigned_client_id"] == "edge-1"
+        assert bridge.submit(job["id"], {"html":"ok"}, "edge-1")
+        result = await capture
+        assert result["browser_client_id"] == "edge-1"
+        assert result["browser_name"] == "Edge"
+    asyncio.run(scenario())
+
+
+def test_late_standby_submission_cannot_reactivate_browser():
+    bridge = BrowserBridge()
+    bridge.heartbeat(True, True, "chrome-1", "Chrome")
+    bridge.heartbeat(True, True, "edge-1", "Edge")
+    bridge.set_active_client("edge-1")
+    assert not bridge.submit("already-finished", {"html":"stale"}, "chrome-1")
+    assert bridge.status()["active_client_id"] == "edge-1"
+
+
 def test_accept_partial_can_be_undone(tmp_path):
     async def scenario():
         store = CatalogStore(tmp_path / "review.db")

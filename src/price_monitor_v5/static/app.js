@@ -516,14 +516,6 @@ function correctionButton(kind, itemId, sourceKey) {
   return `<button type="button" class="compact secondary correct-result-button" data-correct-kind="${escapeHtml(kind)}" data-correct-item="${itemId}" data-correct-source="${escapeHtml(sourceKey)}">Add seller offer / review</button>`;
 }
 
-function coverageInfo(task, suffix = '') {
-  if (!task || task.coverage === 'complete') return '';
-  const detail = task.coverage_detail || 'The marketplace result count could not be fully reconciled.';
-  const message = `Coverage notice: ${detail}. Min/max prices use the exact offers collected during this check; this partial result is not reused from cache.`;
-  const id = `coverage-${task.item_id}-${task.marketplace_key}-${suffix}`;
-  return `<span class="parsing-info coverage-info"><button type="button" class="info-button" aria-label="${escapeHtml(uiText('Coverage notice'))}" aria-describedby="${escapeHtml(id)}">i</button><span role="tooltip" id="${escapeHtml(id)}">${escapeHtml(uiText(message))}</span></span>`;
-}
-
 function marketplaceCell(row, openDetails, maximum = false) {
   if (!row.tasks.length) return '—';
   const detailKey = `${row.key}:marketplaces:${maximum ? 'max' : 'min'}`;
@@ -532,7 +524,7 @@ function marketplaceCell(row, openDetails, maximum = false) {
     const availabilityNote = offer ? ` · ${offer.availability === 'UNKNOWN' ? 'availability unconfirmed' : offer.availability.toLowerCase().replaceAll('_', ' ')}` : '';
     const coverageNote = task.coverage === 'reported_gap' ? ' · all visible offers collected; marketplace count differs' : task.coverage !== 'complete' ? ' · partial' : '';
     const note = availabilityNote + coverageNote;
-    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}${coverageInfo(task, maximum ? 'max' : 'min')}<small>${escapeHtml(note)}</small></span>`;
+    return `<span class="marketplace-summary-offer"><b>${escapeHtml(task.marketplace)}:</b> ${offer ? offerLink(offer, priceAnomalyWarning(row, offer.price_eur)) : badge(task.status.replaceAll('_', ' '), statusClass(task.status))}<small>${escapeHtml(note)}</small></span>`;
   }).join('');
   const details = row.tasks.map(task => {
     const source = marketplaceSourceForTask(task);
@@ -614,7 +606,7 @@ function renderResults() {
     const marketplacesEnabled = state.sources.some(item => item.kind === 'marketplace' && item.effective_enabled);
     const shopCells = state.sources.filter(item => item.kind === 'shop' && item.effective_enabled).map(shop => cell(`shop-${shop.key}`, shopCell(row, shop, openDetails), 'shop-cell')).join('');
     const marketplaceResultCell = marketplacesEnabled ? cell('marketplaces', marketplaceCell(row, openDetails), 'source-cell') + cell('marketplaces-max', marketplaceCell(row, openDetails, true), 'source-cell') : '';
-    const refresh = row.itemId ? `<button type="button" class="refresh-model-button" data-refresh-model="${row.itemId}" title="Refresh this model on enabled marketplaces only" aria-label="Refresh ${escapeHtml(row.model)}">↻</button>${copyModelButton(row.model)}` : '';
+    const refresh = row.itemId ? `<button type="button" class="refresh-model-button" data-refresh-model="${row.itemId}" title="Retry only marketplaces without a collected price" aria-label="Refresh ${escapeHtml(row.model)}">↻</button>${copyModelButton(row.model)}` : '';
     return `<tr class="${resultRowVisible(row) ? '' : 'result-row-filtered'}">${cell('model', `<span class="result-model"><span>${escapeHtml(row.model)}</span>${refresh}</span>`, 'model-cell')}${marketplaceResultCell}${cell('lowest-stock', offerLink(stockOffer, priceAnomalyWarning(row, stockOffer?.price_eur)))}${cell('lowest-preorder', offerLink(preorderOffer, priceAnomalyWarning(row, preorderOffer?.price_eur)))}${shopCells}${cell('stock', row.stockQuantity == null ? '—' : `${escapeHtml(row.stockQuantity)} / ${euro(row.stockCost)}`)}${cell('margin', margin == null ? '—' : `${margin >= 0 ? '+' : ''}${margin.toFixed(2)} EUR`)}${cell('status', statusCell(row))}</tr>`;
   }).join('') : `<tr><td colspan="${cols.length}" class="empty">No monitoring results yet.</td></tr>`;
 }
@@ -841,7 +833,7 @@ function renderQueueProgress(execution) {
       : batch.stopped ? uiText('Stopped') : row.remaining ? uiText('Queued') : uiText('Completed');
     const current = `${task} · ${escapeHtml(uiText(`Finished ${row.finished}/${row.total} · waiting ${row.queued} · checking ${row.running} · review ${row.needs_review}`))}`;
     const eta = row.remaining && row.eta_seconds ? uiText(`ETA ${formatDuration(row.eta_seconds)}`) : `${row.finished}/${row.total}`;
-    const health = row.marketplace_key === 'salidzini' ? `<span class="muted">Safe Auto: ${row.safe_pages || 0}/20 pages in this browser cycle${row.cooldown_until ? ` · cooldown until ${escapeHtml(new Date(row.cooldown_until).toLocaleTimeString(uiLocale()))}` : ''}</span>` : '';
+    const health = row.marketplace_key === 'salidzini' ? `<span class="muted">Safe Auto: ${row.safe_pages || 0}/20 pages in ${escapeHtml(row.active_browser || 'active browser')}${row.cooldown_until ? ` · cooldown until ${escapeHtml(new Date(row.cooldown_until).toLocaleTimeString(uiLocale()))}` : ''}${row.last_handoff ? ` · ${escapeHtml(row.last_handoff)}` : ''}</span>` : '';
     const protection = row.protection_paused ? `<span class="queue-protection">${escapeHtml(uiText(row.protection_reason || 'Protection pause · no more automatic requests in this batch'))}</span>` : '';
     return `<div class="queue-progress-row"><strong>${escapeHtml(row.marketplace)}</strong><span class="queue-progress-current">${current}${health}${protection}</span><span class="queue-progress-eta">${escapeHtml(eta)}</span></div>`;
   }).join('');
@@ -856,7 +848,7 @@ function renderRun(run) {
   state.tasks = run.tasks || []; state.shopResults = run.shop_results || [];
   state.lastRunStatus = run.status;
   const resultSignature = JSON.stringify([
-    state.tasks.map(item => [item.item_id, item.marketplace_key || item.marketplace, item.status, item.offers, item.coverage, item.error, item.cached, item.finished_at]),
+    state.tasks.map(item => [item.item_id, item.marketplace_key || item.marketplace, item.status, item.offers, item.coverage, item.error, item.cached, item.finished_at, item.collection_browser]),
     state.shopResults.map(item => [item.item_id, item.shop_key, item.status, item.price_eur, item.availability, item.product_url, item.search_url, item.error, item.retry_after, item.cached, item.checked_at]),
   ]);
   const resultsChanged = resultSignature !== state.resultRenderSignature;
@@ -944,7 +936,7 @@ async function refreshOneModel(event) {
   button.disabled = true; button.classList.add('spinning');
   try {
     const result = await api(`/runs/${encodeURIComponent(state.currentRunId)}/models/${button.dataset.refreshModel}/retry`, { method: 'POST' });
-    showBanner('success', result.checks_started ? `Refreshing ${result.checks_started} enabled checks for this model.` : 'No enabled marketplace checks are available for this model.');
+    showBanner('success', result.checks_started ? `Refreshing ${result.checks_started} marketplaces without a collected price.` : 'All enabled marketplaces already have a collected price for this model.');
     await pollRun(state.currentRunId);
     if (result.checks_started) {
       scheduleRunPolling(state.currentRunId, 1000);
@@ -1026,7 +1018,8 @@ async function retryUnresolved(marketplaceOverride = null) {
         marketplace_key: sourceKey, limit: Number(byId('retry-limit').value) })
     });
     const pass = sourceKey === 'salidzini' && result.retry_round ? ` Retry pass ${result.retry_round} will not roll over to previously visited models.` : '';
-    showBanner('success', result.checks_started ? `${result.checks_started} unresolved checks queued.${pass}` : 'No unresolved checks matched the selected sources.');
+    const continuation = result.automatic_batches ? ' Safe 5 + 5 + 10 batches, browser hand-off and cooldown continuation are automatic.' : '';
+    showBanner('success', result.checks_started ? `${result.checks_started} unresolved checks queued.${pass}${continuation}` : 'No unresolved checks matched the selected sources.');
     await pollRun(state.currentRunId);
     if (result.checks_started) scheduleRunPolling(state.currentRunId, 700);
   } catch (error) { showBanner('error', error.message); }

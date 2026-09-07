@@ -2,16 +2,16 @@ const test=require('node:test'), assert=require('node:assert/strict'), vm=requir
 const URL1='https://www.salidzini.lv/cena?q=TCL+115RM9L';
 function harness() {
   const storage={activeJobs:{}}, tabs=new Map(), navigations=[], results=[], timers=[];
-  let clock=1000,alive=true,challenge=false,ready=true,changedUrl=false,appUrl='http://127.0.0.1:8050';
+  let clock=1000,alive=true,challenge=false,ready=true,changedUrl=false,active=true,appUrl='http://127.0.0.1:8050';
   const local={get:async key=>typeof key==='string'?{[key]:storage[key]}:{...key,...structuredClone(storage)},
     set:async value=>Object.assign(storage,structuredClone(value)),remove:async key=>delete storage[key]};
   const ctx=vm.createContext({URL,Map,AbortSignal,console,Date:class extends Date{static now(){return clock;}},
     JOB_ALARM_PREFIX:'job:',setTimeout:fn=>{timers.push(fn);return timers.length;},
-    settings:async()=>({appUrl}),activeJobs:async()=>structuredClone(storage.activeJobs),
+    settings:async()=>({appUrl,clientId:'browser-1'}),activeJobs:async()=>structuredClone(storage.activeJobs),
     saveActiveJobs:async jobs=>{storage.activeJobs=structuredClone(jobs);},
     removeActiveJob:async id=>{delete storage.activeJobs[id];},setStatus:async()=>{},inspectJob:async()=>{},
     salidziniPage:value=>{const u=new URL(value); if(u.hostname!=='www.salidzini.lv'||u.pathname!=='/cena')throw Error('wrong page');return u.href;},
-    bridgeFetch:async()=>({ok:true,json:async()=>({jobs:alive?[{id:'a'},{id:'b'}]:[]})}),
+    bridgeFetch:async()=>({ok:true,json:async()=>({active_client_id:active?'browser-1':'browser-2',jobs:alive?[{id:'a',assigned_client_id:'browser-1'},{id:'b',assigned_client_id:'browser-1'}]:[]})}),
     snapshot:async id=>({url:changedUrl?'https://shop.test/':tabs.get(id).url,html:'real DOM snapshot',security_challenge:challenge,
       salidzini_ready:ready,salidzini_fingerprint:'cards',salidzini_card_count:ready?2:0,
       page_text_length:ready?500:0,ready_state:'complete',title:'Salidzini results',incomplete:false}),
@@ -27,7 +27,7 @@ function harness() {
   const run=code=>vm.runInContext(code,ctx);
   const start=id=>run(`acceptAutomaticSalidzini({id:'${id}',shop_key:'salidzini',model:'115RM9L',url:'${URL1}',automatic:true})`);
   const inspect=id=>run(`inspectAutomaticSalidzini('${id}', ${JSON.stringify(storage.activeJobs[id])})`);
-  return {storage,tabs,navigations,results,start,inspect,setAlive:v=>alive=v,setChallenge:v=>challenge=v,setReady:v=>ready=v,
+  return {storage,tabs,navigations,results,start,inspect,setAlive:v=>alive=v,setActive:v=>active=v,setChallenge:v=>challenge=v,setReady:v=>ready=v,
     expire:()=>clock+=31000,setChangedUrl:v=>changedUrl=v,setApp:v=>appUrl=v};
 }
 test('automatically captures stable results, reuses one tab, requires no popup clicks',async()=>{
@@ -45,6 +45,9 @@ test('stopped job cannot open a new page; in-flight stop discards capture',async
   const h=harness();h.setAlive(false);await h.start('a');assert.equal(h.tabs.size,0);
   h.setAlive(true);await h.start('a');h.setAlive(false);await h.inspect('a');
   assert.equal(h.results.length,0);assert.equal(h.storage.activeJobs.a,undefined);assert.equal(h.tabs.has(1),false);
+});
+test('standby browser discards stale work before navigation or submission',async()=>{
+  const h=harness();h.setActive(false);await h.start('a');assert.equal(h.tabs.size,0);assert.equal(h.results.length,0);
 });
 test('repurposed owned tab is left alone and a new one is used',async()=>{
   const h=harness();await h.start('a');await h.inspect('a');await h.inspect('a');h.tabs.get(1).url='https://shop.test/';

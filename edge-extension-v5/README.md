@@ -1,6 +1,6 @@
-# PriceMonitor v5 Marketplace Bridge · 5.0.19
+# PriceMonitor v5 Marketplace Bridge · 5.0.20
 
-In 5.0.19 PriceMonitor refreshes persisted marketplace results when the user returns to the application tab. Salidzini uses one background tab and changes its search model between checks. In 5.0.18 Salidzini retry batches were restricted to one retry pass without rolling over to already visited models.
+In 5.0.20 PriceMonitor synchronizes Chrome and Edge through one authoritative active-client queue. The safe Salidzini 5 + 5 + 10 cycle automatically hands work to a healthy standby browser or resumes after cooldown. The popup identifies this browser as active or standby, and stale captures are never reported as saved.
 PriceMonitor selects exactly one active browser; a second connected browser is
 standby and cannot consume the same job. Switch only from the application while
 no capture is active. Salidzini Auto uses a guarded 5 + 5 + 10 page cycle with

@@ -160,6 +160,40 @@ def test_two_unavailable_pages_trip_guard_and_explicit_batch_resets_it(tmp_path)
     asyncio.run(scenario())
 
 
+def test_safe_cycle_hands_off_to_connected_standby_browser(tmp_path):
+    store = CatalogStore(tmp_path/'db')
+    bridge = BrowserBridge()
+    bridge.heartbeat(True, True, 'chrome-1', 'Chrome')
+    bridge.heartbeat(True, True, 'edge-1', 'Edge')
+    monitor = MarketplaceMonitor(store, bridge, delay=1)
+    for _ in range(20):
+        monitor.record_salidzini_capture('one', {
+            'browser_client_id':'chrome-1', 'browser_name':'Chrome',
+            'salidzini_card_count':1,
+        })
+    state = monitor.salidzini_state('one')
+    assert bridge.status()['active_client_id'] == 'edge-1'
+    assert state['browser_cycles']['chrome-1']['paused']
+    assert state['active_browser'] == 'Edge' and state['successful_pages'] == 0
+
+
+def test_safe_cycle_cooldown_resumes_automatically_without_second_click(tmp_path):
+    async def scenario():
+        store = CatalogStore(tmp_path/'db')
+        bridge = BrowserBridge(); bridge.heartbeat(True, True, 'chrome-1', 'Chrome')
+        monitor = MarketplaceMonitor(store, bridge, delay=1)
+        monitor.salidzini_cycle_cooldown_seconds = .03
+        for _ in range(20):
+            monitor.record_salidzini_capture('one', {
+                'browser_client_id':'chrome-1', 'browser_name':'Chrome',
+                'salidzini_card_count':1,
+            })
+        await monitor.prepare_salidzini_browser({'run_id':'one','marketplace_key':'salidzini','source_model':'NEXT'})
+        state = monitor.salidzini_state('one')
+        assert not state['paused'] and state['successful_pages'] == 0
+    asyncio.run(scenario())
+
+
 def test_auto_hard_stop_cancels_bridge_and_late_capture(tmp_path):
     async def scenario():
         store=CatalogStore(tmp_path/'db'); item=store.create_item('source',{'model':'115RM9L'});store.begin_run('one','deep')

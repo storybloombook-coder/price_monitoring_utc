@@ -21,7 +21,8 @@ async function refresh() {
   const saved = await chrome.storage.local.get({
     appUrl: DEFAULT_APP_URL,
     closeSuccessfulTabs: true,
-    bridgeStatus: null
+    bridgeStatus: null,
+    clientId: ''
   });
   if (document.activeElement !== urlInput) urlInput.value = saved.appUrl;
   if (document.activeElement !== closeTabsInput) closeTabsInput.checked = saved.closeSuccessfulTabs;
@@ -31,10 +32,15 @@ async function refresh() {
     });
     if (!response.ok) throw new Error(`PriceMonitor connection failed (${response.status})`);
     const live = await response.json();
+    const own = (live.clients || []).find(client => client.id === saved.clientId);
     const transport = live.transport === 'websocket' ? 'live channel' : live.transport === 'polling' ? 'recovery polling' : 'offline';
-    showStatus(live.connected ? 'connected' : 'disconnected', live.connected
-      ? `Connected to PriceMonitor · ${transport}`
-      : 'PriceMonitor is reachable. Manual page capture is available; the background channel is offline.');
+    if (live.connected && own && !own.active) {
+      showStatus('standby', `${own.browser_name || 'This browser'} connected as standby · ${live.active_browser || 'another browser'} is collecting`);
+    } else {
+      showStatus(live.connected ? 'connected' : 'disconnected', live.connected
+        ? `${own?.browser_name || live.active_browser || 'Browser'} connected and active · ${transport}`
+        : 'PriceMonitor is reachable. Manual page capture is available; the background channel is offline.');
+    }
   } catch (error) {
     showStatus('disconnected', `PriceMonitor is unavailable: ${String(error?.message || error)}`);
   }

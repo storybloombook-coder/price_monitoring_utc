@@ -7,6 +7,7 @@ header small, p { color: var(--muted); }
 .mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; background: var(--brand); color: white; font-weight: 800; }
 .status { padding: 9px 11px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 9px; }
 .status.connected { color: var(--brand); border-color: var(--brand); }
+.status.standby { color: #805800; border-color: #d4aa3f; background: color-mix(in srgb, #ffd96a 14%, transparent); }
 .status.attention, .status.disconnected { color: #a66105; }
 label { display: grid; gap: 5px; margin: 10px 0; font-weight: 650; }
 label.check { display: flex; align-items: center; gap: 7px; font-weight: 500; }

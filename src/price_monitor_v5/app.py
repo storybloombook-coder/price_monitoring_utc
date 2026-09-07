@@ -75,6 +75,7 @@ def create_app(settings=None, store=None, transport=None):
                     "salidzini_page_timeout_seconds":30,"salidzini_circuit_breaker_failures":2,
                     "salidzini_safe_cycle_pages":[5,5,10],"salidzini_cycle_pauses_seconds":[45,90],
                     "salidzini_blank_page_cooldown_seconds":3000,
+                    "salidzini_cycle_cooldown_seconds":1200,"salidzini_automatic_browser_handoff":True,
                     "cache_ttl_seconds":14400,"negative_cache_ttl_seconds":0,
                     "cooldown_seconds":600,"browser_concurrency":1}}
 
@@ -371,10 +372,11 @@ def create_app(settings=None, store=None, transport=None):
     async def retry_model(run_id: str,item_id: int):
         enabled = {s["key"] for s in catalog.list_sources() if s["effective_enabled"]}
         tasks = [task for task in catalog.checks(run_id)
-                 if task["item_id"]==item_id and task["marketplace_key"] in enabled]
+                 if task["item_id"]==item_id and task["marketplace_key"] in enabled
+                 and not (task.get("status") == "SUCCESS" and task.get("offers"))]
         if tasks:
             catalog.resume_monitoring_session(run_id)
-            monitor.begin_batch(run_id,tasks,f"Retry model {tasks[0]['source_model']}")
+            monitor.begin_batch(run_id,tasks,f"Retry missing marketplaces for {tasks[0]['source_model']}")
         count = 0
         for task in tasks:
             await monitor.retry(run_id,item_id,task["marketplace_key"],capture=False)
@@ -428,7 +430,12 @@ def create_app(settings=None, store=None, transport=None):
             current_retry_count = int(tasks[0].get("retry_count") or 0)
             tasks = [task for task in tasks if int(task.get("retry_count") or 0) == current_retry_count]
             retry_round = current_retry_count + 1
-        tasks = tasks[:limit]
+        # Salidzini's own 5 + 5 + 10 pacing is the batch boundary. Queue the
+        # complete current retry pass so it can hand off Chrome -> Edge or wait
+        # for cooldown and continue without another user click.
+        automatic_batches = source_key == "salidzini"
+        if not automatic_batches:
+            tasks = tasks[:limit]
         if tasks:
             catalog.resume_monitoring_session(run_id)
             monitor.begin_batch(run_id,tasks,"Retry unresolved" if source_key == "all" else f"Retry {tasks[0]['marketplace']}")
@@ -437,7 +444,7 @@ def create_app(settings=None, store=None, transport=None):
             await monitor.retry(run_id, task["item_id"], task["marketplace_key"], capture=False)
             count += 1
         return {"checks_started": count, "status": "PENDING" if count else "UNCHANGED",
-                "retry_round": retry_round}
+                "retry_round": retry_round, "automatic_batches": automatic_batches}
 
     @app.post("/runs/{run_id}/salidzini/health-check")
     async def salidzini_health_check(run_id: str):
@@ -445,10 +452,6 @@ def create_app(settings=None, store=None, transport=None):
             raise HTTPException(409,"Wait for the active batch or stop it first")
         if not bridge.connected or not bridge.automatic_salidzini:
             raise ValueError("Connect the v5 extension in the browser you want to test")
-        guard = monitor.salidzini_state(run_id)
-        if guard.get("cooldown_until") and guard["cooldown_until"] > utc_now():
-            raise ValueError(f"This browser session is cooling down until {guard['cooldown_until']}. Switch to the connected standby browser or wait.")
-        guard.update(paused=False,reason=None,cooldown_until=None)
         tasks = [task for task in catalog.checks(run_id) if task["marketplace_key"] == "salidzini"
                  and task.get("status") in {"ACTION_REQUIRED","FAILED","INCOMPLETE"}
                  and not task.get("candidate_matches") and not task.get("offers")]

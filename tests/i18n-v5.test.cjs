@@ -31,16 +31,16 @@ test('Russian translates live counters without touching SKU and price data', () 
 });
 
 test('Russian translates the engine-ready location requested for the toggle', () => {
-  assert.equal(translateText('v5.0.19 · marketplace engine ready', 'ru'), 'v5.0.19 · движок маркетплейсов готов');
+  assert.equal(translateText('v5.0.20 · marketplace engine ready', 'ru'), 'v5.0.20 · движок маркетплейсов готов');
   assert.equal(translateText('v5: only Kaina24, Salidzini and Hinnavaatlus are queried. Shop columns are derived from marketplace offers.', 'ru'), 'v5: запрашиваются только Kaina24, Salidzini и Hinnavaatlus. Столбцы магазинов формируются из предложений маркетплейсов.');
 });
 
 test('HTML loads localization before application code and exposes both language buttons', () => {
   const html = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/index.html'), 'utf8');
-  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.19') < html.indexOf('/assets/app.js?v=5.0.19'));
+  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.20') < html.indexOf('/assets/app.js?v=5.0.20'));
   assert.match(html, /data-language="en"/);
   assert.match(html, /data-language="ru"/);
-  assert.match(html, /Price Monitor v5\.0\.19/);
+  assert.match(html, /Price Monitor v5\.0\.20/);
   assert.equal(translateText('Retry pass 1 will not roll over to previously visited models.', 'ru'), 'Круг перепроверки 1 не перейдёт повторно к уже пройденным моделям.');
   const script = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/i18n.js'), 'utf8');
   assert.match(script, /typeof window === 'undefined'/);
@@ -55,6 +55,8 @@ test('live result refresh retries rendering and reconciles the table on tab retu
   assert.match(script, /window\.addEventListener\('focus', refreshRunWhenVisible\)/);
   assert.match(script, /document\.addEventListener\('visibilitychange', refreshRunWhenVisible\)/);
   assert.match(script, /one background Salidzini tab and reuses it/);
+  assert.doesNotMatch(script, /function coverageInfo\(/);
+  assert.match(script, /Retry only marketplaces without a collected price/);
 });
 
 test('browser toggle persists the choice and navigates to an explicit language URL', () => {

@@ -39,6 +39,9 @@ class CaptureJob:
             "url": self.url,
             "automatic": self.automatic,
             "verification_id": self.verification_id,
+            # The extension uses this to discard work that belonged to the
+            # other browser after an active Chrome/Edge hand-off.
+            "assigned_client_id": self.assigned_client,
         }
 
 
@@ -59,7 +62,7 @@ class BrowserBridge:
         self._clients: dict[str, dict[str, Any]] = {}
         self.active_client_id: str | None = None
 
-    def _client(self, client_id="legacy", browser_name="Browser"):
+    def _client(self, client_id="legacy", browser_name=None):
         client_id = str(client_id or "legacy")[:96]
         record = self._clients.setdefault(client_id, {"id":client_id,"browser_name":browser_name or "Browser",
                                                        "last_seen":0.0,"websockets":0,
@@ -87,7 +90,7 @@ class BrowserBridge:
     def connected(self) -> bool:
         return self.active_client() is not None
 
-    def heartbeat(self, automatic_salidzini=None, open_collect=None, client_id="legacy", browser_name="Browser") -> None:
+    def heartbeat(self, automatic_salidzini=None, open_collect=None, client_id="legacy", browser_name=None) -> None:
         self._last_seen = time.monotonic()
         record = self._client(client_id,browser_name)
         record["last_seen"] = self._last_seen
@@ -112,6 +115,25 @@ class BrowserBridge:
         self.automatic_salidzini = bool(record.get("automatic_salidzini"))
         self.open_collect = bool(record.get("open_collect"))
         return self.status()
+
+    def client_name(self, client_id):
+        record = self._clients.get(str(client_id))
+        return record.get("browser_name") if record else None
+
+    def activate_standby(self, *, exclude=(), allowed=None):
+        """Select a healthy connected standby client without user UI races."""
+        excluded = {str(value) for value in exclude if value}
+        allowed = {str(value) for value in allowed} if allowed is not None else None
+        for record in self._clients.values():
+            if (record["id"] in excluded or not self.client_connected(record)
+                    or not record.get("automatic_salidzini")
+                    or (allowed is not None and record["id"] not in allowed)):
+                continue
+            self.active_client_id = record["id"]
+            self.automatic_salidzini = bool(record.get("automatic_salidzini"))
+            self.open_collect = bool(record.get("open_collect"))
+            return record
+        return None
 
     def begin_verification(self) -> str:
         now = time.monotonic()
@@ -207,15 +229,24 @@ class BrowserBridge:
                 return None
             job = self._jobs.get(job_id)
             if job and not job.future.done():
+                # A websocket from the previously active browser may already
+                # be waiting on the shared queue when the user/server switches
+                # Chrome <-> Edge. It must not steal the next job.
+                if self.active_client_id != str(client_id):
+                    self._queue.put_nowait(job_id)
+                    return None
                 job.assigned_client = str(client_id)
                 return job.public()
 
     def submit(self, job_id: str, payload: dict[str, Any], client_id="legacy") -> bool:
-        self.heartbeat(client_id=client_id)
         job = self._jobs.get(job_id)
         if not job or job.future.done() or (job.assigned_client and job.assigned_client != str(client_id)):
             return False
+        # A late result from a stale extension job must not make that browser
+        # active again. Heartbeat only after ownership has been validated.
+        self.heartbeat(client_id=client_id)
         payload["browser_client_id"] = str(client_id)
+        payload["browser_name"] = self.client_name(client_id) or "Browser"
         job.future.set_result(payload)
         return True
 

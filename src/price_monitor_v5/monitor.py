@@ -31,6 +31,8 @@ class MarketplaceMonitor:
         self.batches = {}
         self.verification_jobs = {}
         self.salidzini_health = {}
+        self.salidzini_cycle_cooldown_seconds = 20 * 60
+        self.salidzini_unavailable_cooldown_seconds = 50 * 60
 
     def launch(self, run_id):
         tasks = [task for task in self.store.checks(run_id) if task["status"] == "PENDING"]
@@ -47,40 +49,136 @@ class MarketplaceMonitor:
             "stopped": False,
         }
         self.activities[run_id] = {}
-        # Keep a live protection cooldown across retry clicks. A new attempt is
-        # allowed after it expires or after a deliberate active-browser switch.
-        previous = self.salidzini_health.get(run_id, {})
-        cooldown = previous.get("cooldown_until")
-        if self.delay == 0 or not cooldown or cooldown <= utc_now():
+        # Keep each browser session's protection cooldown across retry clicks.
+        # Only isolated zero-delay tests deliberately start a fresh guard for
+        # every explicit batch.
+        if self.delay == 0 or run_id not in self.salidzini_health:
             self.salidzini_health[run_id] = {
                 "consecutive_unavailable": 0, "successful_pages": 0,
                 "paused": False, "reason": None, "cooldown_until": None,
-                "pause_until_monotonic": 0,
+                "pause_until_monotonic": 0, "browser_cycles": {},
             }
 
     def salidzini_state(self, run_id):
         return self.salidzini_health.setdefault(run_id, {
             "consecutive_unavailable": 0, "successful_pages": 0,
             "paused": False, "reason": None, "cooldown_until": None,
-            "pause_until_monotonic": 0,
+            "pause_until_monotonic": 0, "browser_cycles": {},
         })
 
-    def reset_salidzini_browser_cycle(self):
-        """A deliberate active-browser switch starts a fresh isolated session."""
-        for state in self.salidzini_health.values():
-            state.update(consecutive_unavailable=0, successful_pages=0, paused=False,
-                         reason=None, cooldown_until=None, pause_until_monotonic=0)
+    def _active_browser(self):
+        if hasattr(self.bridge, "active_client"):
+            record = self.bridge.active_client()
+            if record:
+                return str(record["id"]), str(record.get("browser_name") or "Browser")
+        return "default", "Browser"
 
-    def pause_salidzini(self, run_id, reason):
+    def _browser_cycle(self, run_id, client_id=None, browser_name=None):
         state = self.salidzini_state(run_id)
-        state.update(paused=True, reason=reason,
-                     cooldown_until=(datetime.now(UTC)+timedelta(minutes=50)).isoformat())
+        if client_id is None:
+            client_id, browser_name = self._active_browser()
+        cycle = state.setdefault("browser_cycles", {}).setdefault(str(client_id), {
+            "browser_name": browser_name or "Browser", "consecutive_unavailable": 0,
+            "successful_pages": 0, "paused": False, "reason": None,
+            "cooldown_until": None, "pause_until_monotonic": 0,
+            "requires_manual": False,
+        })
+        if browser_name:
+            cycle["browser_name"] = browser_name
+        return cycle
+
+    def _sync_salidzini_state(self, run_id):
+        state = self.salidzini_state(run_id)
+        client_id, browser_name = self._active_browser()
+        cycle = self._browser_cycle(run_id, client_id, browser_name)
+        state.update({key: cycle.get(key) for key in (
+            "consecutive_unavailable", "successful_pages", "paused", "reason",
+            "cooldown_until", "pause_until_monotonic", "requires_manual")})
+        state["active_client_id"] = client_id
+        state["active_browser"] = browser_name
+        return state, cycle
+
+    def reset_salidzini_browser_cycle(self):
+        """Synchronize a deliberate browser switch without erasing cooldowns."""
+        for run_id in self.salidzini_health:
+            self._sync_salidzini_state(run_id)
+
+    def _switch_salidzini_browser(self, run_id, exclude=()):
+        if not hasattr(self.bridge, "activate_standby"):
+            return None
+        now = utc_now()
+        state = self.salidzini_state(run_id)
+        allowed = []
+        for client in self.bridge.status().get("clients", []):
+            if not client.get("connected"):
+                continue
+            cycle = state.get("browser_cycles", {}).get(client["id"], {})
+            if not cycle.get("cooldown_until") or cycle["cooldown_until"] <= now:
+                allowed.append(client["id"])
+        record = self.bridge.activate_standby(exclude=exclude, allowed=allowed)
+        if record:
+            state["last_handoff"] = f'{record.get("browser_name") or "Browser"} activated automatically'
+            self._sync_salidzini_state(run_id)
+        return record
+
+    async def prepare_salidzini_browser(self, task):
+        """Wait safely or hand work to a healthy connected browser session."""
+        run_id = task["run_id"]
+        while True:
+            state, cycle = self._sync_salidzini_state(run_id)
+            if self.delay == 0 and cycle.get("paused"):
+                task["automation_paused"] = True
+                raise ReviewRequired('Salidzini Auto paused this batch to protect the browser session. No request was sent for this SKU.')
+            now = utc_now()
+            deadline = cycle.get("cooldown_until")
+            if deadline and deadline <= now:
+                cycle.update(consecutive_unavailable=0, successful_pages=0, paused=False,
+                             reason=None, cooldown_until=None, pause_until_monotonic=0,
+                             requires_manual=False)
+                self._sync_salidzini_state(run_id)
+                continue
+            if cycle.get("paused"):
+                current_id = state.get("active_client_id")
+                switched = self._switch_salidzini_browser(run_id, exclude={current_id})
+                if switched:
+                    self.set_activity(task, f'Switched Salidzini collection to {switched.get("browser_name") or "standby browser"}')
+                    continue
+                if cycle.get("requires_manual"):
+                    task["automation_paused"] = True
+                    raise ReviewRequired('Salidzini CAPTCHA needs manual action in the retained tab. No healthy standby browser is available; solve it, then retry the unfinished Salidzini checks.')
+                if deadline:
+                    remaining = max(0.0, (datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds())
+                    if remaining:
+                        self.set_activity(task, f'Automatic Salidzini cooldown · resuming in {round(remaining)} s')
+                        await asyncio.sleep(min(remaining, 5))
+                        continue
+                cycle.update(paused=False, reason=None, cooldown_until=None)
+                continue
+            pause = max(0, float(cycle.get("pause_until_monotonic") or 0) - time.monotonic())
+            if pause:
+                self.set_activity(task, f"Safe Salidzini pause · resuming in {round(pause)} s")
+                await asyncio.sleep(pause)
+                cycle["pause_until_monotonic"] = 0
+                cycle["reason"] = None
+                self._sync_salidzini_state(run_id)
+            return
+
+    def pause_salidzini(self, run_id, reason, *, client_id=None, browser_name=None, requires_manual=False):
+        cycle = self._browser_cycle(run_id, client_id, browser_name)
+        cycle.update(paused=True, reason=reason, requires_manual=requires_manual,
+                     cooldown_until=(datetime.now(UTC)+timedelta(seconds=self.salidzini_unavailable_cooldown_seconds)).isoformat())
+        self._sync_salidzini_state(run_id)
 
     def record_salidzini_capture(self, run_id, result):
         """Pause a batch before repeated blank/protected pages create a block."""
         state = self.salidzini_state(run_id)
+        client_id = str(result.get("browser_client_id") or self._active_browser()[0])
+        browser_name = str(result.get("browser_name") or (self.bridge.client_name(client_id) if hasattr(self.bridge, "client_name") else "Browser") or "Browser")
+        cycle = self._browser_cycle(run_id, client_id, browser_name)
         if result.get("security_challenge"):
-            self.pause_salidzini(run_id, "CAPTCHA or browser security challenge")
+            self.pause_salidzini(run_id, "CAPTCHA or browser security challenge", client_id=client_id,
+                                 browser_name=browser_name, requires_manual=True)
+            self._switch_salidzini_browser(run_id, exclude={client_id})
             return
         message = str(result.get("error") or "")
         unavailable = any(marker in message.lower() for marker in (
@@ -88,20 +186,25 @@ class MarketplaceMonitor:
             "could not read the retailer page", "search page changed or redirected",
         ))
         if unavailable:
-            state["consecutive_unavailable"] += 1
-            if state["consecutive_unavailable"] >= 2:
-                self.pause_salidzini(run_id, "two consecutive unavailable result pages")
+            cycle["consecutive_unavailable"] += 1
+            if cycle["consecutive_unavailable"] >= 2:
+                self.pause_salidzini(run_id, "two consecutive unavailable result pages",
+                                     client_id=client_id, browser_name=browser_name)
+                self._switch_salidzini_browser(run_id, exclude={client_id})
         elif not message and int(result.get("salidzini_card_count") or 0) > 0:
-            state.update(consecutive_unavailable=0, reason=None)
-            state["successful_pages"] = int(state.get("successful_pages") or 0) + 1
-            count = state["successful_pages"]
+            cycle.update(consecutive_unavailable=0, reason=None)
+            cycle["successful_pages"] = int(cycle.get("successful_pages") or 0) + 1
+            count = cycle["successful_pages"]
             if count == 5:
-                state.update(reason="Safe Auto pause after 5 pages", pause_until_monotonic=time.monotonic()+45)
+                cycle.update(reason="Safe Auto pause after 5 pages", pause_until_monotonic=time.monotonic()+45)
             elif count == 10:
-                state.update(reason="Safe Auto pause after the next 5 pages", pause_until_monotonic=time.monotonic()+90)
+                cycle.update(reason="Safe Auto pause after the next 5 pages", pause_until_monotonic=time.monotonic()+90)
             elif count >= 20:
-                state.update(paused=True, reason="Safe 5 + 5 + 10 cycle complete; switch the active browser or wait before continuing",
-                             cooldown_until=(datetime.now(UTC)+timedelta(minutes=20)).isoformat())
+                cycle.update(paused=True, requires_manual=False,
+                             reason="Safe 5 + 5 + 10 cycle complete; automatic cooldown before continuing",
+                             cooldown_until=(datetime.now(UTC)+timedelta(seconds=self.salidzini_cycle_cooldown_seconds)).isoformat())
+                self._switch_salidzini_browser(run_id, exclude={client_id})
+        self._sync_salidzini_state(run_id)
 
     def schedule(self, task, capture=False):
         ident = (task["run_id"], task["item_id"], task["marketplace_key"])
@@ -152,6 +255,8 @@ class MarketplaceMonitor:
                 "protection_reason": guard.get("reason"),
                 "safe_pages": guard.get("successful_pages",0),
                 "cooldown_until": guard.get("cooldown_until"),
+                "active_browser": guard.get("active_browser"),
+                "last_handoff": guard.get("last_handoff"),
             })
         return {"label": batch["label"], "started_at": batch["started_at"],
                 "stopped": batch.get("stopped", False), "marketplaces": rows}
@@ -209,16 +314,7 @@ class MarketplaceMonitor:
                 if automatic and not verification:
                     if not self.bridge.connected or not getattr(self.bridge, 'automatic_salidzini', False):
                         raise ReviewRequired('Salidzini Auto needs the connected v5.0.8+ extension. Reload/connect it, then retry; manual page capture remains available.')
-                    state = self.salidzini_state(task["run_id"])
-                    pause = max(0, float(state.get("pause_until_monotonic") or 0)-time.monotonic())
-                    if pause:
-                        self.set_activity(task, f"Safe Salidzini pause · resuming in {round(pause)} s")
-                        await asyncio.sleep(pause)
-                        state["pause_until_monotonic"] = 0
-                        state["reason"] = None
-                    if state["paused"]:
-                        task["automation_paused"] = True
-                        raise ReviewRequired('Salidzini Auto paused this batch to protect the browser session after CAPTCHA or repeated unavailable pages. No request was sent for this SKU. Complete the CAPTCHA in the retained tab, then retry Salidzini in a batch of 5.')
+                    await self.prepare_salidzini_browser(task)
                     capture = True
                 if self.blocked(key) and not capture:
                     raise ReviewRequired("Automatic requests are cooling down. Manual offer entry and browser capture are available now.")
@@ -226,7 +322,10 @@ class MarketplaceMonitor:
                 self.set_activity(task, "Starting check")
                 self.store.save_check(task)
                 # A bounded check always returns to review; never endless Checking.
-                async with asyncio.timeout(900 if verification else 180 if automatic else 90 if capture else 65):
+                # Safe Salidzini cooldowns can intentionally span many minutes;
+                # each individual browser capture still has its own short,
+                # bounded timeout in BrowserBridge/the extension.
+                async with asyncio.timeout(900 if verification else 7200 if automatic else 90 if capture else 65):
                     # Preserve the working legacy Kaina request profile. One fixed
                     # profile, no header rotation or retries after protection.
                     headers = ({"User-Agent": "PriceMonitor/0.1 (local price monitoring)", "Accept": "*/*"}
@@ -332,16 +431,7 @@ class MarketplaceMonitor:
                     verification = task.get('verification_id')
                     if automatic or verification:
                         if automatic:
-                            state = self.salidzini_state(task["run_id"])
-                            pause = max(0, float(state.get("pause_until_monotonic") or 0)-time.monotonic())
-                            if pause:
-                                self.set_activity(task, f"Safe Salidzini pause · resuming in {round(pause)} s")
-                                await asyncio.sleep(pause)
-                                state["pause_until_monotonic"] = 0
-                                state["reason"] = None
-                            if state.get("paused"):
-                                task["automation_paused"] = True
-                                raise ReviewRequired('Safe Salidzini browser cycle paused before another page was opened. Switch the active browser or wait for the displayed cooldown.')
+                            await self.prepare_salidzini_browser(task)
                         pace_key = key + '-browser'
                         pace = self.salidzini_delay if automatic else self.delay
                         wait = pace - (time.monotonic() - self.last_request.get(pace_key, 0))
@@ -355,6 +445,8 @@ class MarketplaceMonitor:
                     else:
                         result = await self.bridge.capture(key,model,url)
                     if automatic:
+                        task["collection_browser"] = result.get("browser_name") or "Browser"
+                        task["browser_client_id"] = result.get("browser_client_id")
                         task["page_diagnostics"] = result.get("page_diagnostics") or {
                             "title": result.get("title"),
                             "ready_state": result.get("ready_state"),
