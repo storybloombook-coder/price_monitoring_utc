@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlsplit, parse_qsl, urlencode
 import httpx
 from .catalog import utc_now
 from .sources import marketplace_url, search_url, same_salidzini_search, MARKETPLACES
-from .offers import parse_page, normalize_offer, shortened_queries, candidate_links, plausible_shortened_candidate
+from .offers import parse_page, normalize_offer, shortened_queries, candidate_links, plausible_shortened_candidate, candidate_model
 
 
 class ReviewRequired(ValueError):
@@ -577,9 +577,12 @@ class MarketplaceMonitor:
         if index < 0 or index >= len(candidates):
             raise ValueError("Candidate changed; reopen Quick Review")
         candidate = candidates[index]
-        alias = candidate.get("model")
+        # Older stored Quick Review cards may predate concrete candidate-model
+        # extraction. Infer it from the already-reviewed title/query so the
+        # button cannot remain in an unresolvable loop after an upgrade.
+        alias = candidate.get("model") or candidate_model(candidate.get("query"), candidate.get("title"))
         if not alias:
-            raise ValueError("The candidate model could not be identified")
+            raise ValueError("This suggestion has no identifiable SKU. Mark it as Not found or open the comparison link.")
         task["undo_snapshot"] = {k:v for k,v in task.items() if k != "undo_snapshot"}
         task["accepted_model"] = alias
         task["product_url"] = marketplace_url(key, candidate["url"])

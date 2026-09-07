@@ -31,16 +31,16 @@ test('Russian translates live counters without touching SKU and price data', () 
 });
 
 test('Russian translates the engine-ready location requested for the toggle', () => {
-  assert.equal(translateText('v5.0.16 · marketplace engine ready', 'ru'), 'v5.0.16 · движок маркетплейсов готов');
+  assert.equal(translateText('v5.0.17 · marketplace engine ready', 'ru'), 'v5.0.17 · движок маркетплейсов готов');
   assert.equal(translateText('v5: only Kaina24, Salidzini and Hinnavaatlus are queried. Shop columns are derived from marketplace offers.', 'ru'), 'v5: запрашиваются только Kaina24, Salidzini и Hinnavaatlus. Столбцы магазинов формируются из предложений маркетплейсов.');
 });
 
 test('HTML loads localization before application code and exposes both language buttons', () => {
   const html = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/index.html'), 'utf8');
-  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.16') < html.indexOf('/assets/app.js?v=5.0.16'));
+  assert.ok(html.indexOf('/assets/i18n.js?v=5.0.17') < html.indexOf('/assets/app.js?v=5.0.17'));
   assert.match(html, /data-language="en"/);
   assert.match(html, /data-language="ru"/);
-  assert.match(html, /Price Monitor v5\.0\.16/);
+  assert.match(html, /Price Monitor v5\.0\.17/);
   const script = fs.readFileSync(path.join(__dirname, '../src/price_monitor_v5/static/i18n.js'), 'utf8');
   assert.match(script, /typeof window === 'undefined'/);
   assert.match(script, /searchParams\.set\('lang', next\)/);

@@ -3,13 +3,40 @@ import asyncio
 from price_monitor_v5.browser_bridge import BrowserBridge
 from price_monitor_v5.catalog import CatalogStore
 from price_monitor_v5.monitor import MarketplaceMonitor
-from price_monitor_v5.offers import plausible_shortened_candidate, matched_model
+from price_monitor_v5.offers import plausible_shortened_candidate, matched_model, candidate_model
 
 
 def test_shortened_candidates_are_narrow_and_q75_alias_is_explicit():
     assert not plausible_shortened_candidate("25G54", "TCL gaming monitor 25G64")
     assert plausible_shortened_candidate("S55HE", "TCL soundbar S55H")
     assert matched_model("hinnavaatlus", "Q75HE", "Teler TCL Q75H") == "Q75H"
+    assert candidate_model("Z100-", "TCL Z100") == "Z100"
+
+
+def test_old_quick_review_card_without_model_resolves_instead_of_looping(tmp_path):
+    async def scenario():
+        store = CatalogStore(tmp_path / "candidate.db")
+        monitor = MarketplaceMonitor(store, BrowserBridge(), delay=0)
+        item = store.create_item("source", {"model":"Z100-SW"})
+        store.begin_run("candidate", "deep")
+        task = store.check("candidate", item["id"], "kaina24")
+        task.update(status="ACTION_REQUIRED", candidate_matches=[{
+            "title":"TCL Z100", "url":"https://www.kaina24.lt/p/tcl-z100/",
+            "query":"Z100-", "model":None,
+        }])
+        store.save_check(task)
+        called = {}
+        async def retry(run_id, item_id, key, **kwargs):
+            called.update(run_id=run_id,item_id=item_id,key=key,**kwargs)
+        monitor.retry = retry
+        await monitor.accept_candidate("candidate",item["id"],"kaina24",{
+            "candidate_index":0,"remember_alias":True,
+        })
+        saved = store.check("candidate",item["id"],"kaina24")
+        assert saved["accepted_model"] == "Z100"
+        assert store.model_aliases()["Z100SW"] == "Z100"
+        assert called["url"] == "https://www.kaina24.lt/p/tcl-z100/"
+    asyncio.run(scenario())
 
 
 def test_two_browser_clients_have_one_active_queue_consumer():

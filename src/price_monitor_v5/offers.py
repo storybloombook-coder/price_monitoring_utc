@@ -76,7 +76,11 @@ def candidate_model(query, text):
     """Return the concrete SKU token behind a shortened-search candidate."""
     prefix = compact(query)
     candidates = [compact(token) for token in re.findall(r"[A-Z0-9-]+", str(text).upper())]
-    candidates = [token for token in candidates if token.startswith(prefix) and token != prefix
+    # The marketplace may expose the shortened value itself as the concrete
+    # regional SKU (for example Z100-SW -> Z100).  At this stage the caller has
+    # already classified the card as a plausible candidate, so retaining the
+    # exact prefix is both necessary and bounded.
+    candidates = [token for token in candidates if token.startswith(prefix)
                   and re.search(r"[A-Z]", token) and re.search(r"\d", token)]
     return min(candidates, key=len, default=None)
 
